@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; overflow: hidden; background: transparent; }
+      body { font-family: system-ui, -apple-system, sans-serif; }
+      #frame { width: 100%; display: flex; flex-direction: column; align-items: center; }
+      #canvas {
+        position: relative;
+        display: inline-block;
+        max-width: 100%;
+        cursor: crosshair;
+        touch-action: none;
+        border: 2px solid #00a9d6;
+        border-radius: 7px;
+        overflow: hidden;
+        box-shadow: 0 4px 18px rgba(0, 169, 214, 0.20);
+      }
+      #pdf { display: block; max-width: 100%; height: auto; pointer-events: none; user-select: none; }
+      #selection {
+        position: absolute;
+        display: none;
+        pointer-events: none;
+        border: 2px dashed #ef315d;
+        background: rgba(239, 49, 93, 0.18);
+        box-shadow: 0 0 8px rgba(239, 49, 93, 0.45);
+      }
+      #info { padding: 7px 4px 1px; color: #16728a; font-size: 13px; font-weight: 650; }
+    </style>
+  </head>
+  <body>
+    <div id="frame">
+      <div id="canvas">
+        <img id="pdf" alt="Rendered PDF page" draggable="false" />
+        <div id="selection"></div>
+      </div>
+      <div id="info">Drag a rectangle over the text to read</div>
+    </div>
+    <script>
+      const frame = document.getElementById("frame");
+      const canvas = document.getElementById("canvas");
+      const image = document.getElementById("pdf");
+      const selection = document.getElementById("selection");
+      const info = document.getElementById("info");
+      let start = null;
+      let current = null;
+      let lastImage = null;
+
+      function send(type, payload = {}) {
+        window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, "*");
+      }
+
+      function resizeFrame() {
+        requestAnimationFrame(() => send("streamlit:setFrameHeight", { height: frame.scrollHeight + 4 }));
+      }
+
+      function clamp(value) { return Math.max(0, Math.min(1, value)); }
+
+      function pointFromEvent(event) {
+        const rect = image.getBoundingClientRect();
+        return {
+          x: clamp((event.clientX - rect.left) / rect.width),
+          y: clamp((event.clientY - rect.top) / rect.height),
+        };
+      }
+
+      function draw(region) {
+        current = region;
+        if (!region) {
+          selection.style.display = "none";
+          info.textContent = "Drag a rectangle over the text to read";
+          return;
+        }
+        const x0 = Math.min(region.x0, region.x1);
+        const x1 = Math.max(region.x0, region.x1);
+        const y0 = Math.min(region.y0, region.y1);
+        const y1 = Math.max(region.y0, region.y1);
+        selection.style.left = `${x0 * 100}%`;
+        selection.style.top = `${y0 * 100}%`;
+        selection.style.width = `${(x1 - x0) * 100}%`;
+        selection.style.height = `${(y1 - y0) * 100}%`;
+        selection.style.display = "block";
+        info.textContent = `Selected: X ${Math.round(x0 * 100)}-${Math.round(x1 * 100)}%, Y ${Math.round(y0 * 100)}-${Math.round(y1 * 100)}%`;
+      }
+
+      canvas.addEventListener("pointerdown", (event) => {
+        if (!image.complete) return;
+        event.preventDefault();
+        canvas.setPointerCapture(event.pointerId);
+        start = pointFromEvent(event);
+        draw({ x0: start.x, y0: start.y, x1: start.x, y1: start.y });
+      });
+
+      canvas.addEventListener("pointermove", (event) => {
+        if (!start) return;
+        const point = pointFromEvent(event);
+        draw({ x0: start.x, y0: start.y, x1: point.x, y1: point.y });
+      });
+
+      canvas.addEventListener("pointerup", (event) => {
+        if (!start) return;
+        const point = pointFromEvent(event);
+        const value = {
+          x0: Math.min(start.x, point.x), y0: Math.min(start.y, point.y),
+          x1: Math.max(start.x, point.x), y1: Math.max(start.y, point.y),
+        };
+        start = null;
+        if (value.x1 - value.x0 < 0.01 || value.y1 - value.y0 < 0.01) {
+          draw(null);
+          send("streamlit:setComponentValue", { value: null });
+          return;
+        }
+        draw(value);
+        send("streamlit:setComponentValue", { value });
+      });
+
+      window.addEventListener("message", (event) => {
+        if (event.data.type !== "streamlit:render") return;
+        const args = event.data.args || {};
+        const requestedWidth = Math.max(320, Number(args.width || 620));
+        image.style.width = `${requestedWidth}px`;
+        if (args.image && args.image !== lastImage) {
+          lastImage = args.image;
+          image.onload = () => { draw(args.initial || current); resizeFrame(); };
+          image.src = args.image;
+        } else {
+          draw(current || args.initial || null);
+          resizeFrame();
+        }
+      });
+
+      send("streamlit:componentReady", { apiVersion: 1 });
+      resizeFrame();
+    </script>
+  </body>
+</html>

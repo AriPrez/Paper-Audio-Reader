@@ -1,0 +1,291 @@
+"""Offline regression tests for the academic paper reader."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import sys
+
+import fitz
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from parser import (  # noqa: E402
+    clean_academic_text,
+    dehyphenate_text,
+    extract_page_blocks_for_selection,
+    extract_sections_with_bboxes,
+    is_true_section_header,
+    join_line_spans,
+    order_selected_text,
+    remove_parenthetical_citations,
+    render_page_with_red_underlines,
+    select_blocks_in_region,
+)
+from tts_engine import chunk_text  # noqa: E402
+
+
+def create_test_academic_pdf() -> bytes:
+    """Create a small, genuinely multiline two-page paper fixture."""
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_textbox(fitz.Rect(54, 55, 558, 85), "Abstract", fontsize=14, fontname="hebo")
+    page.insert_textbox(
+        fitz.Rect(54, 90, 558, 155),
+        "Tumor-specific tissue-resident cells were quantified (Smith et al., 2020) [1-3]. "
+        "IFN-γ+ TNF-α+ cells remained detectable.",
+        fontsize=10,
+    )
+    page.insert_textbox(fitz.Rect(54, 175, 558, 205), "1. Introduction", fontsize=14, fontname="hebo")
+    page.insert_textbox(
+        fitz.Rect(54, 210, 290, 360),
+        "Single-cell profiling identifies immune populations. Immuno-\ntherapy responses vary between patients.",
+        fontsize=10,
+    )
+    page.insert_textbox(
+        fitz.Rect(322, 210, 558, 360),
+        "The right column follows the complete left column and preserves biological terminology.",
+        fontsize=10,
+    )
+
+    page = document.new_page(width=612, height=792)
+    page.insert_textbox(fitz.Rect(54, 55, 558, 85), "2. Results", fontsize=14, fontname="hebo")
+    page.insert_textbox(
+        fitz.Rect(54, 90, 290, 230),
+        "The treatment increased the abundance of CXCR6+ CD8+ cells. The effect was reproducible.",
+        fontsize=10,
+    )
+    page.insert_textbox(
+        fitz.Rect(322, 90, 558, 130),
+        "96 Conditions 335,917 Cells",
+        fontsize=14,
+        fontname="hebo",
+    )
+    page.insert_textbox(fitz.Rect(322, 135, 558, 170), "P = 0.0059", fontsize=14, fontname="hebo")
+    page.insert_textbox(
+        fitz.Rect(322, 180, 558, 240),
+        "Figure 1. Quantification of activated populations across conditions.",
+        fontsize=9,
+    )
+    page.insert_textbox(fitz.Rect(54, 270, 558, 300), "Discussion", fontsize=14, fontname="hebo")
+    page.insert_textbox(
+        fitz.Rect(54, 305, 558, 380),
+        "These observations support a durable immune response without changing scientific compounds.",
+        fontsize=10,
+    )
+    page.insert_textbox(fitz.Rect(54, 420, 558, 450), "References", fontsize=14, fontname="hebo")
+    page.insert_textbox(
+        fitz.Rect(54, 455, 558, 500),
+        "Smith A. Example reference. 2020.",
+        fontsize=9,
+    )
+
+    result = document.tobytes()
+    document.close()
+    return result
+
+
+def test_dehyphenation_only_joins_line_breaks() -> None:
+    text = "tumor-specific single-cell immuno-\ntherapy MD-VRP"
+    assert dehyphenate_text(text) == "tumor-specific single-cell immunotherapy MD-VRP"
+
+
+def test_biomedical_cleaning_preserves_markers_and_filters_citations() -> None:
+    raw = (
+        "Tumor-specific tissue-resident single-cell response.\n"
+        "IFN-γ+ TNF-α+ cells (Smith et al., 2020; Doe et al., 2021) [1, 3-5]."
+    )
+    cleaned = clean_academic_text(raw)
+    assert "Tumor-specific" in cleaned
+    assert "tissue-resident" in cleaned
+    assert "single-cell" in cleaned
+    assert "IFN-γ+ TNF-α+" in cleaned
+    assert "Smith" not in cleaned
+    assert "[1" not in cleaned
+
+
+@pytest.mark.parametrize(
+    "citation",
+    [
+        "(Smith et al., 2020; Doe and Roe, 2021)",
+        "(van der Woude et al. 2019)",
+        "(1)",
+        "(1–3, 7)",
+        "(refs. 2-5)",
+    ],
+)
+def test_parenthetical_citation_variants_are_removed(citation: str) -> None:
+    assert remove_parenthetical_citations(f"Before {citation} after") == "Before  after"
+
+
+@pytest.mark.parametrize("content", ["(IFN-γ+)", "(n = 24)", "(95% CI, 1.2–2.4)"])
+def test_scientific_parentheses_are_preserved(content: str) -> None:
+    assert remove_parenthetical_citations(content) == content
+
+
+def test_each_filter_can_be_disabled() -> None:
+    raw = "Figure 2. Result overview\nText (Smith et al., 2020) [2] https://example.org"
+    untouched = clean_academic_text(
+        raw,
+        filter_brackets=False,
+        filter_parentheses=False,
+        filter_urls=False,
+        filter_captions=False,
+    )
+    assert "Figure 2" in untouched
+    assert "Smith" in untouched
+    assert "[2]" in untouched
+    assert "https://example.org" in untouched
+    filtered = clean_academic_text(raw)
+    assert "Figure 2" not in filtered
+    assert "Smith" not in filtered
+    assert "[2]" not in filtered
+    assert "example.org" not in filtered
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["96 Conditions 335,917 Cells", "64.0% 2.2%", "13.5% 83.9%", "P = 0.0059"],
+)
+def test_statistics_are_not_section_headers(label: str) -> None:
+    assert not is_true_section_header(label, font_size=14, body_font_size=10, is_bold=True)
+
+
+def test_section_extraction_uses_typography_and_stops_before_references() -> None:
+    sections = extract_sections_with_bboxes(create_test_academic_pdf())
+    titles = [section["title"].lower() for section in sections]
+    assert any("abstract" in title for title in titles)
+    assert any("introduction" in title for title in titles)
+    assert any("results" in title for title in titles)
+    assert any("discussion" in title for title in titles)
+    assert all("conditions" not in title for title in titles)
+    assert all("0.0059" not in title for title in titles)
+    assert all("references" not in title for title in titles)
+    combined = " ".join(section["clean_text"] for section in sections)
+    assert "Tumor-specific" in combined
+    # Base-14 PDF fonts replace Greek glyphs, but the marker line must survive.
+    assert "IFN-" in combined and "TNF-" in combined
+
+
+def test_rectangle_selection_uses_both_axes() -> None:
+    pdf = create_test_academic_pdf()
+    page = extract_page_blocks_for_selection(pdf, 1)
+    left_region = {"x0": 0.05, "y0": 0.24, "x1": 0.50, "y1": 0.50}
+    blocks = select_blocks_in_region(page["blocks"], page["width"], page["height"], left_region)
+    selected_text = " ".join(block["text"] for block in blocks)
+    assert "Single-cell" in selected_text
+    assert "right column" not in selected_text
+
+
+def test_forced_two_column_order_reads_left_before_right() -> None:
+    blocks = [
+        {
+            "lines": [
+                {"text": "Left line one.", "bbox": (50, 100, 250, 112)},
+                {"text": "Right line one.", "bbox": (350, 100, 550, 112)},
+                {"text": "Left line two.", "bbox": (50, 120, 250, 132)},
+                {"text": "Right line two.", "bbox": (350, 120, 550, 132)},
+            ]
+        }
+    ]
+    region = {"x0": 0.05, "y0": 0.10, "x1": 0.95, "y1": 0.25}
+    text = order_selected_text(blocks, 600, 800, region, layout_mode="two_columns")
+    assert text.splitlines() == [
+        "Left line one.",
+        "Left line two.",
+        "",
+        "Right line one.",
+        "Right line two.",
+    ]
+
+
+def test_pdf_span_spacing_is_reconstructed_from_geometry() -> None:
+    spans = [
+        {"text": "death", "bbox": (0, 0, 25, 10), "size": 10},
+        {"text": "varies", "bbox": (27, 0, 52, 10), "size": 10},
+        {"text": ",", "bbox": (52, 0, 54, 10), "size": 10},
+        {"text": "micro", "bbox": (58, 0, 80, 10), "size": 10},
+        {"text": "environment", "bbox": (80, 0, 125, 10), "size": 10},
+    ]
+    assert join_line_spans(spans) == "death varies, microenvironment"
+
+
+def test_missing_spaces_inside_one_pdf_span_are_rebuilt_from_glyphs() -> None:
+    characters = []
+    cursor = 0.0
+    for word_index, word in enumerate(["death", "varies", "greatly"]):
+        if word_index:
+            cursor += 2.4  # Visible word gap, but deliberately no space glyph.
+        for character in word:
+            characters.append({"c": character, "bbox": (cursor, 0, cursor + 4, 10)})
+            cursor += 4
+    spans = [{"size": 10, "chars": characters}]
+    assert join_line_spans(spans) == "death varies greatly"
+
+
+def test_sentence_spacing_is_restored_after_citation_removal() -> None:
+    raw = "Individual tumors (Smith et al., 2020).Which subsets respond?Next sentence."
+    assert clean_academic_text(raw) == "Individual tumors. Which subsets respond? Next sentence."
+
+
+CELL_FIRST_PDF = Path(__file__).parent.parent / "references" / "CellFirst.pdf"
+
+
+@pytest.mark.skipif(not CELL_FIRST_PDF.exists(), reason="CellFirst.pdf is not available")
+def test_cellfirst_first_introduction_paragraph_has_real_word_spaces() -> None:
+    pdf = CELL_FIRST_PDF.read_bytes()
+    page = extract_page_blocks_for_selection(pdf, 2)
+    region = {
+        "x0": 50 / page["width"],
+        "y0": 650 / page["height"],
+        "x1": 305 / page["width"],
+        "y1": 740 / page["height"],
+    }
+    blocks = select_blocks_in_region(page["blocks"], page["width"], page["height"], region)
+    raw = order_selected_text(
+        blocks,
+        page["width"],
+        page["height"],
+        region,
+        layout_mode="single_column",
+    )
+    cleaned = clean_academic_text(raw)
+
+    assert "death vary greatly between different cancers and individual tumors." in cleaned
+    assert "Which of the numerous cell subsets in a tumor contribute to the response" in cleaned
+    assert "how their interactions are regulated" in cleaned
+    assert "deathvary" not in cleaned
+    assert "numerouscellsubsets" not in cleaned
+    assert "atumorcontribute" not in cleaned
+
+
+def test_page_rendering_returns_png() -> None:
+    pdf = create_test_academic_pdf()
+    sections = extract_sections_with_bboxes(pdf)
+    bboxes = sections[0]["bboxes_by_page"].get(1, [])
+    rendered = render_page_with_red_underlines(pdf, page_num=1, bboxes=bboxes, dpi=120)
+    assert rendered.startswith(b"\x89PNG")
+
+
+def test_tts_chunking_is_bounded_and_lossless() -> None:
+    text = " ".join(f"Sentence {index} contains several useful words." for index in range(100))
+    chunks = chunk_text(text, max_chars=240)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 240 for chunk in chunks)
+    assert " ".join(chunks) == text
+
+
+REAL_PDF = os.environ.get("IMMUNOLOGY_TEST_PDF")
+
+
+@pytest.mark.skipif(not REAL_PDF, reason="Set IMMUNOLOGY_TEST_PDF for the local paper regression")
+def test_real_immunology_paper_has_no_statistical_section_titles() -> None:
+    pdf_path = Path(REAL_PDF)
+    sections = extract_sections_with_bboxes(pdf_path.read_bytes())
+    titles = [section["title"] for section in sections]
+    assert sections
+    assert not any("%" in title or "P =" in title or "Conditions" in title for title in titles)
+    assert any("Results" in title for title in titles)
+    assert any("Discussion" in title for title in titles)
+    assert any("Method Details" in title for title in titles)
