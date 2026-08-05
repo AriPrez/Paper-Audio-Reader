@@ -425,7 +425,7 @@ def test_default_chunking_keeps_a_normal_paragraph_whole() -> None:
     should reach the service in one piece."""
     paragraph = " ".join(
         f"Synthetic sentence {index} contains enough ordinary words for testing."
-        for index in range(20)
+        for index in range(6)
     )
     assert len(paragraph) < DEFAULT_CHUNK_CHARS
     assert chunk_text(paragraph) == [paragraph]

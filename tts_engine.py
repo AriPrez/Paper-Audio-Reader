@@ -41,15 +41,18 @@ class SpeechGenerationError(RuntimeError):
 
 
 # Each chunk is synthesised independently, so every boundary resets the voice's
-# intonation to neutral. At 600 characters that happened roughly every 25
-# seconds of speech, which is what made continuous prose sound recited. Longer
-# chunks measured no slower against the live service: generation time varies
-# with the service's mood, not with the length of the request.
-DEFAULT_CHUNK_CHARS = 2000
+# intonation to neutral and longer chunks would read more naturally. That is not
+# available here: Edge throttles larger requests hard. Measured on identical
+# text, 6 chunks of 600 characters completed in 6-111s, while 2 chunks of 2000
+# timed out entirely after 121s. The 600 ceiling is a service constraint, not a
+# conservative guess — raising it trades a small prosody gain for failed
+# generations.
+DEFAULT_CHUNK_CHARS = 600
 
-# The same measurements showed occasional chunks stalling for tens of seconds
-# at random. Retrying once is far cheaper than failing a whole selection, since
-# a stalled request that is reissued usually returns immediately.
+# Chunks still stall at random, and a reissued request usually returns at once
+# (110.9s then 6.2s for the same text, minutes apart). Retrying is worth it, but
+# each attempt costs a full timeout, so both numbers stay modest: a stalled
+# chunk surfaces after 90s at worst rather than blocking the whole selection.
 CHUNK_ATTEMPTS = 2
 
 
