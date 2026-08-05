@@ -264,7 +264,10 @@ st.sidebar.divider()
 
 layout_mode = st.sidebar.selectbox(
     "Reading order",
-    options=["automatic", "single_column", "two_columns"],
+    # Single column first: it is the default because it is the safe reading of
+    # an arbitrary rectangle, and the automatic detector can reorder a
+    # paragraph it misreads as two columns.
+    options=["single_column", "automatic", "two_columns"],
     format_func=lambda value: {
         "automatic": "Automatic",
         "single_column": "Single column / rows",
