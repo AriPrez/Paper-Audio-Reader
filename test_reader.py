@@ -563,6 +563,95 @@ async def _no_delay(_seconds: float) -> None:
     return None
 
 
+def test_concurrent_generation_reassembles_chunks_in_order(monkeypatch) -> None:
+    """Chunks are requested at once and finish out of order; the audio must
+    still be the sequential result. The live service returns slightly different
+    bytes on every call, so ordering can only be pinned down with a stub."""
+    import tts_engine
+
+    text = " ".join(f"Sentence number {index} about tumour infiltrating cells." for index in range(40))
+    chunks = chunk_text(text, max_chars=200)
+    assert len(chunks) >= 4, "the fixture must produce several chunks"
+    index_of = {chunk: index for index, chunk in enumerate(chunks)}
+
+    def payload(index: int) -> bytes:
+        return b"\xff\xf3\x64\xc4" + bytes([index]) * 300
+
+    async def fake_chunk(chunk: str, voice: str, rate: str, timeout_seconds: float) -> bytes:
+        index = index_of[chunk]
+        # Invert completion order: the first chunk is the last to arrive.
+        await asyncio.sleep(0.01 * (len(chunks) - index))
+        return payload(index)
+
+    monkeypatch.setattr(tts_engine, "edge_tts", object())
+    monkeypatch.setattr(tts_engine, "_generate_chunk", fake_chunk)
+
+    reported: list[tuple[int, int]] = []
+    audio = asyncio.run(
+        generate_speech_async(
+            text,
+            max_chars=200,
+            concurrency=4,
+            progress=lambda done, total: reported.append((done, total)),
+        )
+    )
+
+    assert audio == b"".join(payload(index) for index in range(len(chunks)))
+    assert reported[-1] == (len(chunks), len(chunks))
+    assert [done for done, _ in reported] == list(range(1, len(chunks) + 1))
+
+
+def test_concurrency_is_bounded(monkeypatch) -> None:
+    """Firing every chunk at once makes the service's throttling worse."""
+    import tts_engine
+
+    text = " ".join(f"Sentence number {index} about tumour infiltrating cells." for index in range(40))
+    live = 0
+    peak = 0
+
+    async def fake_chunk(chunk: str, voice: str, rate: str, timeout_seconds: float) -> bytes:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.01)
+        live -= 1
+        return b"\xff\xf3\x64\xc4" + bytes(300)
+
+    monkeypatch.setattr(tts_engine, "edge_tts", object())
+    monkeypatch.setattr(tts_engine, "_generate_chunk", fake_chunk)
+
+    asyncio.run(generate_speech_async(text, max_chars=200, concurrency=3))
+    assert peak <= 3
+    assert peak > 1, "the requests should overlap at all"
+
+
+def test_a_failed_chunk_cancels_its_siblings(monkeypatch) -> None:
+    """Otherwise the abandoned requests keep hitting the service while the user
+    is already looking at an error."""
+    import tts_engine
+
+    text = " ".join(f"Sentence number {index} about tumour infiltrating cells." for index in range(40))
+    finished = 0
+
+    async def fake_chunk(chunk: str, voice: str, rate: str, timeout_seconds: float) -> bytes:
+        nonlocal finished
+        if chunk.startswith("Sentence number 0 "):
+            raise tts_engine.SpeechGenerationError("service unavailable")
+        # Outlast the failing chunk's retry backoff, so they are still in
+        # flight when it gives up. Patching asyncio.sleep to skip the backoff
+        # would also skip this one and let every sibling finish first.
+        await asyncio.sleep(3.0)
+        finished += 1
+        return b"\xff\xf3\x64\xc4" + bytes(300)
+
+    monkeypatch.setattr(tts_engine, "edge_tts", object())
+    monkeypatch.setattr(tts_engine, "_generate_chunk", fake_chunk)
+
+    with pytest.raises(tts_engine.SpeechGenerationError):
+        asyncio.run(generate_speech_async(text, max_chars=200, concurrency=4))
+    assert finished == 0, "siblings should have been cancelled, not awaited"
+
+
 def test_generate_speech_retries_a_stalled_chunk(monkeypatch) -> None:
     """The service stalls on a chunk at random; reissuing usually returns at
     once, and failing the whole selection instead would waste every chunk

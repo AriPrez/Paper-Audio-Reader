@@ -55,6 +55,12 @@ DEFAULT_CHUNK_CHARS = 600
 # chunk surfaces after 90s at worst rather than blocking the whole selection.
 CHUNK_ATTEMPTS = 2
 
+# Chunks are independent, so they can be requested at the same time and
+# reassembled in order — the audio is unchanged, only the waiting is. The
+# ceiling matters: Edge throttles, and firing every chunk at once makes that
+# worse rather than better. See the measurement in the commit that added this.
+DEFAULT_CONCURRENCY = 4
+
 
 def chunk_text(text: str, max_chars: int = DEFAULT_CHUNK_CHARS) -> list[str]:
     """Split long text on sentence/word boundaries for reliable synthesis."""
@@ -203,12 +209,16 @@ async def generate_speech_async(
     timeout_seconds: float = 35.0,
     max_chars: int = DEFAULT_CHUNK_CHARS,
     progress: Callable[[int, int], None] | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> bytes:
-    """Generate MP3 bytes sequentially in bounded chunks.
+    """Generate MP3 bytes in bounded chunks, several requests at a time.
 
-    ``progress`` is called with ``(completed_chunks, total_chunks)`` after each
-    segment, so a caller can report advancement on long selections instead of
-    showing an indeterminate spinner for several minutes.
+    Chunks are reassembled in their original order, so the audio is identical
+    to what sequential generation produced — only the waiting changes.
+
+    ``progress`` is called with ``(completed_chunks, total_chunks)`` as chunks
+    finish. With concurrency they finish out of order, so the count advances
+    but does not identify which segment completed.
     """
     if edge_tts is None:
         raise ImportError("Installe edge-tts avec `pip install edge-tts`.")
@@ -216,12 +226,33 @@ async def generate_speech_async(
     if not chunks:
         raise ValueError("Aucun texte à lire.")
 
-    audio_parts = []
-    for index, chunk in enumerate(chunks):
-        audio = await _generate_chunk_with_retry(chunk, voice, rate, timeout_seconds)
-        audio_parts.append(audio if index == 0 else _strip_leading_id3(audio))
+    limit = asyncio.Semaphore(max(1, concurrency))
+    completed = 0
+
+    async def render(index: int, chunk: str) -> tuple[int, bytes]:
+        nonlocal completed
+        async with limit:
+            audio = await _generate_chunk_with_retry(chunk, voice, rate, timeout_seconds)
+        completed += 1
         if progress is not None:
-            progress(index + 1, len(chunks))
+            progress(completed, len(chunks))
+        return index, audio
+
+    tasks = [asyncio.create_task(render(index, chunk)) for index, chunk in enumerate(chunks)]
+    try:
+        rendered = await asyncio.gather(*tasks)
+    except BaseException:
+        # Without this, a failed chunk leaves its siblings running against the
+        # service while the caller is already showing an error.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    audio_parts = [
+        audio if index == 0 else _strip_leading_id3(audio)
+        for index, audio in sorted(rendered)
+    ]
     return b"".join(audio_parts)
 
 
@@ -232,6 +263,7 @@ def generate_speech(
     timeout_seconds: float = 35.0,
     max_chars: int = DEFAULT_CHUNK_CHARS,
     progress: Callable[[int, int], None] | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> bytes:
     """Synchronous wrapper suitable for Streamlit's script thread."""
     percentage = round((float(rate) - 1.0) * 100)
@@ -243,6 +275,7 @@ def generate_speech(
         timeout_seconds=timeout_seconds,
         max_chars=max_chars,
         progress=progress,
+        concurrency=concurrency,
     )
 
     try:
