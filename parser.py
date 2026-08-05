@@ -381,6 +381,134 @@ def clean_academic_text(
     return cleaned.strip()
 
 
+# --- Pronunciation for speech ------------------------------------------------
+#
+# A speech engine reads biomedical notation literally, and no voice fixes that:
+# "MSI-H" comes out as "em-ess-eye-dash-aitch", "CD8+" as "see-dee-eight-plus",
+# "10⁶" as "ten six", "et al." as "et al". Expanding the notation before
+# synthesis is what makes a paper sound read rather than decoded.
+#
+# Order is load-bearing: the most specific member of each family must run
+# first (MSI-H before MSI, PD-L1 before PD-1, IFN-γ+ before IFN-γ). Rules that
+# would need to know whether a token is an element, a gene, or an English word
+# are deliberately absent — "OR" for odds ratio and gene symbols like BRCA are
+# left alone rather than mangled.
+
+_SUPERSCRIPT_TO_DIGIT = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+
+
+def _spell(letters: str) -> str:
+    """Space out an acronym so the engine spells it instead of guessing."""
+    return " ".join(letters)
+
+
+def _exponent(match: re.Match) -> str:
+    base, superscript = match.group(1), match.group(2)
+    return f"{base} to the power of {superscript.translate(_SUPERSCRIPT_TO_DIGIT)}"
+
+
+_SPEECH_SUBSTITUTIONS: list[tuple[re.Pattern[str], object]] = [
+    # Latin and reference abbreviations.
+    (re.compile(r"\bet\s+al\.?"), "and colleagues"),
+    (re.compile(r"\be\.\s*g\.,?"), "for example,"),
+    (re.compile(r"\bi\.\s*e\.,?"), "that is,"),
+    (re.compile(r"\bcf\.\s*"), "compare "),
+    (re.compile(r"\bvs\.?(?=\s)"), "versus"),
+    (re.compile(r"\bFigs?\.\s*(?=\d)"), "Figure "),
+    (re.compile(r"\bRefs?\.\s*(?=\d)"), "reference "),
+    # Ionic charges before exponents: Ca²⁺ is "calcium two plus", not squared.
+    (re.compile(r"([⁰¹²³⁴⁵⁶⁷⁸⁹])⁺"), lambda m: f" {m.group(1).translate(_SUPERSCRIPT_TO_DIGIT)} plus"),
+    # Exponents.
+    (re.compile(r"(\w)²(?!\w)"), r"\1 squared"),
+    (re.compile(r"(\w)³(?!\w)"), r"\1 cubed"),
+    (re.compile(r"(\d)([⁰¹⁴⁵⁶⁷⁸⁹]+)"), _exponent),
+    (re.compile(r"(\w+)\s*\^\s*(\d+)"), r"\1 to the power of \2"),
+    # Units and comparison symbols.
+    (re.compile(r"[μµ]M\b"), "micromolar"),
+    (re.compile(r"[μµ]m\b"), "micrometres"),
+    (re.compile(r"[μµ]g\b"), "micrograms"),
+    (re.compile(r"[μµ]L\b", re.IGNORECASE), "microlitres"),
+    (re.compile(r"°\s*C\b"), " degrees Celsius"),
+    (re.compile(r"±"), " plus or minus "),
+    (re.compile(r"≥"), " greater than or equal to "),
+    (re.compile(r"≤"), " less than or equal to "),
+    (re.compile(r"~(?=\d)"), "approximately "),
+    # Cytokines and growth factors.
+    (re.compile(r"\bIFN[-\s]?(?:γ|g|gamma)\s*\+"), "interferon gamma positive"),
+    (re.compile(r"\bIFN[-\s]?(?:γ|g|gamma)\b"), "interferon gamma"),
+    (re.compile(r"\bTNF[-\s]?(?:α|a|alpha)\s*\+"), "tumour necrosis factor alpha positive"),
+    (re.compile(r"\bTNF[-\s]?(?:α|a|alpha)\b"), "tumour necrosis factor alpha"),
+    (re.compile(r"\bTGF[-\s]?(?:β|b|beta)\b"), "T G F beta"),
+    (re.compile(r"\bIL[-\s]?(\d+)\b"), r"interleukin \1"),
+    # Immune checkpoints.
+    (re.compile(r"\bPD[-\s]?L1\b"), "P D L 1"),
+    (re.compile(r"\bPD[-\s]?1\b"), "P D 1"),
+    (re.compile(r"\bCTLA[-\s]?4\b"), "C T L A 4"),
+    (re.compile(r"\bLAG[-\s]?3\b"), "L A G 3"),
+    (re.compile(r"\bTIM[-\s]?3\b"), "T I M 3"),
+    (re.compile(r"\bTIGIT\b"), "T I G I T"),
+    # Mismatch repair and microsatellite status.
+    (re.compile(r"\bdMMR\b"), "mismatch repair deficient"),
+    (re.compile(r"\bpMMR\b"), "mismatch repair proficient"),
+    (re.compile(r"\bMMR\b"), "M M R"),
+    (re.compile(r"\bMSI[-\s]?H\b"), "M S I high"),
+    (re.compile(r"\bMSI[-\s]?L\b"), "M S I low"),
+    (re.compile(r"\bMSS\b"), "M S S"),
+    (re.compile(r"\bMSI\b"), "M S I"),
+    # Cell surface markers and populations.
+    (re.compile(r"\bCD(\d+[a-z]?)\s*\+"), r"C D \1 positive"),
+    # A trailing hyphen means negative only when no word follows it: "CD8- T
+    # cells" is a negative population, "CD8-positive" is a compound adjective.
+    (re.compile(r"\bCD(\d+[a-z]?)\s*[-−](?![\w-])"), r"C D \1 negative"),
+    (re.compile(r"\bCD(\d+[a-z]?)\b"), r"C D \1"),
+    (re.compile(r"\bCXCR(\d+)\s*\+"), r"C X C R \1 positive"),
+    (re.compile(r"\bCXCR(\d+)\b"), r"C X C R \1"),
+    (re.compile(r"\bCXCL(\d+)\s*\+"), r"C X C L \1 positive"),
+    (re.compile(r"\bCXCL(\d+)\b"), r"C X C L \1"),
+    (re.compile(r"\bTILs\b"), "tumour infiltrating lymphocytes"),
+    (re.compile(r"\bTIL\b"), "tumour infiltrating lymphocyte"),
+    (re.compile(r"\bHLA\b"), "H L A"),
+    (re.compile(r"\bTCR\b"), "T C R"),
+    (re.compile(r"\bNK\b"), "N K"),
+    (re.compile(r"\bTCGA\b"), "T C G A"),
+    # Survival endpoints and statistics.
+    (re.compile(r"\bOS\b"), "overall survival"),
+    (re.compile(r"\bPFS\b"), "progression free survival"),
+    (re.compile(r"\bPFI\b"), "progression free interval"),
+    (re.compile(r"\bDFS\b"), "disease free survival"),
+    (re.compile(r"\bDSS\b"), "disease specific survival"),
+    (re.compile(r"\bHR\b"), "hazard ratio"),
+    (re.compile(r"\bCI\b"), "confidence interval"),
+    (re.compile(r"(?<![A-Za-z])([Pp])\s*<\s*"), r"\1 less than "),
+    (re.compile(r"(?<![A-Za-z])([Pp])\s*>\s*"), r"\1 greater than "),
+    (re.compile(r"(?<![A-Za-z])([Pp])\s*=\s*"), r"\1 equals "),
+    (re.compile(r"(?<![A-Za-z])n\s*=\s*"), "n equals "),
+    # Remaining standalone Greek letters.
+    (re.compile(r"α"), " alpha "),
+    (re.compile(r"β"), " beta "),
+    (re.compile(r"γ"), " gamma "),
+    (re.compile(r"δ"), " delta "),
+    (re.compile(r"κ"), " kappa "),
+    (re.compile(r"λ"), " lambda "),
+    (re.compile(r"σ"), " sigma "),
+]
+
+
+def expand_for_speech(text: str) -> str:
+    """Rewrite biomedical notation into what a speech engine should say.
+
+    Applied at synthesis time only: the transcript stays readable on screen
+    while the voice receives "M S I high" instead of "MSI-H".
+    """
+    if not text:
+        return ""
+    spoken = text
+    for pattern, replacement in _SPEECH_SUBSTITUTIONS:
+        spoken = pattern.sub(replacement, spoken)
+    spoken = re.sub(r"[ \t]+([,.;:?!])", r"\1", spoken)
+    return re.sub(r"[ \t]+", " ", spoken).strip()
+
+
 def _normalise_header(text: str) -> str:
     text = text.replace("★", " ")
     text = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", text)

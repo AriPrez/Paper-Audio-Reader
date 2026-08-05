@@ -17,6 +17,7 @@ if str(APP_DIR) not in sys.path:
 from canvas_select import render_crosshair_canvas_selector
 from parser import (
     clean_academic_text,
+    expand_for_speech,
     extract_page_blocks_for_selection,
     normalized_block_boxes,
     order_selected_text,
@@ -129,16 +130,30 @@ def render_empty_state() -> None:
         )
 
 
-def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> None:
-    """Render generation controls and a cached audio player."""
-    words = len(text.split())
+def render_audio_panel(
+    text: str,
+    voice: str,
+    speed: float,
+    key_prefix: str,
+    expand_notation: bool = True,
+) -> None:
+    """Render generation controls and a cached audio player.
+
+    The engine receives the expanded notation while the transcript above stays
+    readable, so what is spoken is shown separately rather than substituted.
+    """
+    spoken = expand_for_speech(text) if expand_notation else text
+    words = len(spoken.split())
     estimate = round(words / max(1.0, 150.0 * speed), 1) if words else 0
-    speech_chunks = chunk_text(text, max_chars=DEFAULT_CHUNK_CHARS) if text else []
+    speech_chunks = chunk_text(spoken, max_chars=DEFAULT_CHUNK_CHARS) if spoken else []
     st.caption(
         f"{words} words · approximately {estimate:g} min · "
         f"{len(speech_chunks)} speech segment(s) · Edge TTS requires Internet"
     )
-    key = cache_key(text, voice, speed) if text else "empty"
+    if spoken and spoken != text:
+        with st.expander("What the voice will read"):
+            st.write(spoken)
+    key = cache_key(spoken, voice, speed) if spoken else "empty"
 
     if st.button(
         "Generate and play audio",
@@ -146,7 +161,7 @@ def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> 
         key=f"{key_prefix}_generate",
         use_container_width=True,
         type="primary",
-        disabled=not bool(text.strip()),
+        disabled=not bool(spoken.strip()),
     ):
         # Long selections take minutes, so report per-segment advancement
         # instead of an indeterminate spinner.
@@ -154,7 +169,7 @@ def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> 
         bar = progress_slot.progress(0.0, text="Contacting the speech service…")
         try:
             st.session_state.audio_cache[key] = generate_speech(
-                text,
+                spoken,
                 voice=voice,
                 rate=speed,
                 timeout_seconds=60,
@@ -274,6 +289,15 @@ st.sidebar.divider()
 voice_label = st.sidebar.selectbox("Voice", list(VOICES))
 voice_name = VOICES[voice_label]
 speed_rate = st.sidebar.slider("Speed", 0.8, 2.0, 1.0, 0.1)
+expand_notation = st.sidebar.checkbox(
+    "Biomedical pronunciation",
+    value=True,
+    help=(
+        "Speech engines read notation literally. This says “M S I high” for MSI-H, "
+        "“C D 8 positive” for CD8+, “ten to the power of 6” for 10⁶ and "
+        "“and colleagues” for et al. The transcript on screen is unchanged."
+    ),
+)
 
 with st.sidebar.expander("Text cleaning", expanded=False):
     st.caption("Everything below is removed from the spoken text.")
@@ -444,7 +468,9 @@ with right_column:
     )
 
     with st.container(border=True):
-        render_audio_panel(spoken_text, voice_name, speed_rate, "rectangle")
+        render_audio_panel(
+            spoken_text, voice_name, speed_rate, "rectangle", expand_notation=expand_notation
+        )
 
 st.divider()
 st.caption(

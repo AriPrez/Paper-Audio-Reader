@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from parser import (  # noqa: E402
     clean_academic_text,
     dehyphenate_text,
+    expand_for_speech,
     extract_page_blocks_for_selection,
     extract_sections_with_bboxes,
     is_true_section_header,
@@ -434,6 +435,68 @@ def test_edge_cbr_mp3_duration_estimate() -> None:
     # MPEG-2 Layer III, bitrate index 6 = 48 kbps.
     audio = bytes.fromhex("fff364c4") + bytes(5996)
     assert estimate_mp3_duration(audio) == pytest.approx(1.0, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    "raw, expected_fragment",
+    [
+        ("dMMR tumours", "mismatch repair deficient"),
+        ("pMMR tumours", "mismatch repair proficient"),
+        ("MSI-H status", "M S I high"),
+        ("MSI-L status", "M S I low"),
+        ("MSS status", "M S S"),
+        ("CD8+ T cells", "C D 8 positive"),
+        ("CD8- T cells", "C D 8 negative"),
+        ("CXCR6+ cells", "C X C R 6 positive"),
+        ("IFN-γ+ cells", "interferon gamma positive"),
+        ("TNF-α levels", "tumour necrosis factor alpha"),
+        ("IL-6 levels", "interleukin 6"),
+        ("PD-L1 blockade", "P D L 1"),
+        ("PD-1 blockade", "P D 1"),
+        ("CTLA-4 blockade", "C T L A 4"),
+        ("TILs were counted", "tumour infiltrating lymphocytes"),
+        ("OS was longer", "overall survival"),
+        ("HR 0.74", "hazard ratio"),
+        ("95% CI", "confidence interval"),
+        ("p < 0.05", "p less than 0.05"),
+        ("n = 42", "n equals 42"),
+        ("10⁶ cells", "10 to the power of 6"),
+        ("x^2 term", "x to the power of 2"),
+        ("m² sections", "m squared"),
+        ("Ca²⁺ free", "Ca 2 plus"),
+        ("37 °C", "degrees Celsius"),
+        ("5 μM buffer", "micromolar"),
+        ("Smith et al. reported", "Smith and colleagues"),
+        ("see Fig. 3", "Figure 3"),
+    ],
+)
+def test_speech_expansion_covers_biomedical_notation(raw: str, expected_fragment: str) -> None:
+    assert expected_fragment in expand_for_speech(raw)
+
+
+def test_speech_expansion_keeps_compound_adjectives_intact() -> None:
+    """A hyphen before a word is a compound, not a negative population."""
+    assert "C D 8-positive" in expand_for_speech("CD8-positive subsets")
+
+
+def test_speech_expansion_is_idempotent() -> None:
+    """The transcript can be re-expanded on every rerun, so a second pass must
+    not corrupt an already-expanded phrase."""
+    raw = (
+        "Tumours with dMMR and MSI-H showed CD8+ and CXCR6+ TILs "
+        "(IFN-γ+, HR 0.74, p < 0.05, n = 42) at 10⁶ cells."
+    )
+    once = expand_for_speech(raw)
+    assert expand_for_speech(once) == once
+
+
+def test_speech_expansion_leaves_ordinary_prose_alone() -> None:
+    prose = "These observations support a durable immune response in treated patients."
+    assert expand_for_speech(prose) == prose
+
+
+def test_speech_expansion_handles_empty_input() -> None:
+    assert expand_for_speech("") == ""
 
 
 def test_voice_catalogue_is_consistent() -> None:

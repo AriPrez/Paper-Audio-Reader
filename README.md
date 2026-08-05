@@ -20,6 +20,8 @@ vocabulaire biomédical tout en retirant le bruit gênant pour la synthèse voca
   `x²` lors du retrait des appels bibliographiques en exposant.
 - Transcription éditable avant synthèse : le texte extrait peut être corrigé
   dans le champ de droite sans redessiner le rectangle.
+- Prononciation biomédicale : la notation est développée avant la synthèse,
+  sans modifier le texte affiché (voir plus bas).
 - Synthèse Edge TTS découpée en segments courts, avec timeout, avancement
   segment par segment, durée MP3 vérifiable, téléchargement et cache par
   contenu.
@@ -94,6 +96,36 @@ avant la colonne droite.
 
 Le moteur expérimental de détection automatique des sections est conservé dans
 le code et testé, mais il n'est pas exposé dans cette version de l'interface.
+
+## Prononciation biomédicale
+
+Un moteur de synthèse lit la notation littéralement : `MSI-H` devient
+« em-esse-i-tiret-ache », `CD8+` « cé-dé-huit-plus », `10⁶` « dix six ».
+Aucune voix ne corrige cela. Avant la synthèse — et **uniquement** pour la
+synthèse, le transcript affiché reste intact — la notation est développée :
+
+| Écrit | Lu |
+| --- | --- |
+| `dMMR` / `pMMR` | mismatch repair deficient / proficient |
+| `MSI-H` / `MSI-L` / `MSS` | M S I high / M S I low / M S S |
+| `CD8+` / `CD8-` | C D 8 positive / C D 8 negative |
+| `IFN-γ+` / `TNF-α` | interferon gamma positive / tumour necrosis factor alpha |
+| `PD-L1` / `CTLA-4` | P D L 1 / C T L A 4 |
+| `OS` / `PFS` / `HR` / `CI` | overall survival / progression free survival / hazard ratio / confidence interval |
+| `p < 0.05` / `n = 42` | p less than 0.05 / n equals 42 |
+| `10⁶` / `m²` / `Ca²⁺` | 10 to the power of 6 / m squared / Ca 2 plus |
+| `et al.` / `Fig. 3` | and colleagues / Figure 3 |
+
+Le bouton « What the voice will read » affiche le texte réellement envoyé au
+moteur. La case **Biomedical pronunciation** désactive le tout.
+
+Les règles vivent dans `_SPEECH_SUBSTITUTIONS` (`parser.py`) et s'appliquent
+dans l'ordre : la plus spécifique de chaque famille d'abord (`MSI-H` avant
+`MSI`, `PD-L1` avant `PD-1`). `CD8-positive` reste un adjectif composé, seul
+`CD8-` suivi d'un espace devient « negative ». Les cas qui exigeraient de
+savoir si un sigle est un gène, un élément ou un mot anglais sont volontairement
+absents : `OR` (odds ratio) et `BRCA` sont laissés tels quels plutôt que
+massacrés.
 
 ## Tests
 
