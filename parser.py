@@ -557,7 +557,7 @@ def _citation_like_superscript_spans(spans: list[dict]) -> set[int]:
                     or len(previous_token.group(1)) <= 2
                 )
             )
-            has_charge_or_unit_suffix = bool(suffix[:1] in "+⁺−⁻±%")
+            has_charge_or_unit_suffix = bool(suffix and suffix[0] in "+⁺−⁻±%")
             has_citation_context = bool(
                 prefix
                 and (

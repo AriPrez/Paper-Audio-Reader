@@ -249,6 +249,26 @@ def test_raised_citation_geometry_works_without_pdf_flag() -> None:
     assert join_line_spans(spans, filter_superscript_citations=True) == "reported. Next"
 
 
+def test_raised_citation_at_end_of_line_is_removed() -> None:
+    spans = [
+        {
+            "text": "immune responses.",
+            "bbox": (0, 90, 75, 101),
+            "origin": (0, 100),
+            "size": 10,
+            "flags": 0,
+        },
+        {
+            "text": "37,40,41",
+            "bbox": (75, 84, 103, 92),
+            "origin": (75, 92),
+            "size": 6,
+            "flags": 1,
+        },
+    ]
+    assert join_line_spans(spans, filter_superscript_citations=True) == "immune responses."
+
+
 @pytest.mark.parametrize(
     ("base", "superscript", "suffix"),
     [
