@@ -12,7 +12,10 @@ vocabulaire biomédical tout en retirant le bruit gênant pour la synthèse voca
 - Sélection rectangulaire précise avec coordonnées X/Y renvoyées à Python.
 - Ordre de lecture sélectionnable : automatique, une colonne ou deux colonnes.
 - Conservation des termes comme `tumor-specific`, `single-cell` et `IFN-γ+`.
-- Filtres indépendants pour citations, URLs, légendes et équations.
+- Filtres indépendants pour citations entre crochets, entre parenthèses et
+  numériques en exposant, ainsi que pour les URLs, légendes et équations.
+- Protection des exposants scientifiques tels que `10⁶`, `m²`, `Ca²⁺` et
+  `x²` lors du retrait des appels bibliographiques en exposant.
 - Synthèse Edge TTS découpée en segments courts, avec timeout, durée MP3
   vérifiable, téléchargement et cache par contenu.
 

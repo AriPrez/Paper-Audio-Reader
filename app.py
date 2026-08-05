@@ -205,6 +205,11 @@ speed_rate = st.sidebar.slider("Speed", 0.8, 2.0, 1.0, 0.1)
 st.sidebar.subheader("Cleaning")
 filter_brackets = st.sidebar.checkbox("Bracket citations [1-5]", value=True)
 filter_parentheses = st.sidebar.checkbox("Parenthetical citations (Smith 2020 / (1-3))", value=True)
+filter_superscript_citations = st.sidebar.checkbox(
+    "Superscript numeric citations ¹–⁵",
+    value=True,
+    help="Uses PDF font size and baseline position while preserving scientific exponents such as 10⁶, m² and Ca²⁺.",
+)
 filter_urls = st.sidebar.checkbox("URLs and DOIs", value=True)
 filter_captions = st.sidebar.checkbox("Figures, captions and tables", value=True)
 filter_equations = st.sidebar.checkbox("Standalone equations", value=True)
@@ -295,11 +300,13 @@ try:
         page_data["height"],
         effective_selection,
         layout_mode=layout_mode,
+        filter_superscript_citations=filter_superscript_citations,
     )
     clean_selection = clean_academic_text(
         raw_selection,
         filter_brackets=filter_brackets,
         filter_parentheses=filter_parentheses,
+        filter_superscript_citations=filter_superscript_citations,
         filter_urls=filter_urls,
         filter_captions=filter_captions,
         filter_equations_flag=filter_equations,

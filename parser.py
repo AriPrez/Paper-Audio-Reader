@@ -301,10 +301,30 @@ def remove_parenthetical_citations(text: str) -> str:
     return re.sub(r"\(([^()]*)\)", replace, text)
 
 
+def remove_unicode_superscript_citations(text: str) -> str:
+    """Remove citation-like Unicode superscripts without harming science.
+
+    Real PDF superscripts are normally detected from glyph geometry before
+    this cleaning stage. This fallback covers documents that encode citation
+    numbers as Unicode characters such as ``¹`` and ``²–⁴``. A citation must
+    follow a word of at least three letters or sentence punctuation. This keeps
+    common scientific forms such as ``10⁶``, ``m²``, ``x²`` and ``Ca²⁺``.
+    """
+    superscript_digits = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+    pattern = re.compile(
+        rf"(?P<prefix>\b[A-Za-zÀ-ÖØ-öø-ÿ]{{3,}}|[.,;:!?\)\]\}}])"
+        rf"\s*(?:[{superscript_digits}]+"
+        rf"(?:\s*[,;–—-]\s*[{superscript_digits}]+)*)"
+        rf"(?![{superscript_digits}⁺⁻+−±%])"
+    )
+    return pattern.sub(r"\g<prefix>", text)
+
+
 def clean_academic_text(
     text: str,
     filter_brackets: bool = True,
     filter_parentheses: bool = True,
+    filter_superscript_citations: bool = True,
     filter_urls: bool = True,
     filter_captions: bool = True,
     filter_equations_flag: bool = True,
@@ -347,6 +367,9 @@ def clean_academic_text(
 
     if filter_parentheses:
         cleaned = remove_parenthetical_citations(cleaned)
+
+    if filter_superscript_citations:
+        cleaned = remove_unicode_superscript_citations(cleaned)
 
     if filter_equations_flag:
         cleaned = re.sub(r"\$[^$]+\$", "", cleaned)
@@ -451,8 +474,112 @@ def _join_positioned_chars(spans: list[dict]) -> str:
     return result.strip()
 
 
-def join_line_spans(spans: list[dict]) -> str:
+def _span_text(span: dict) -> str:
+    value = span.get("text")
+    if value is not None:
+        return value
+    return "".join(char.get("c", "") for char in span.get("chars", []))
+
+
+def _citation_like_superscript_spans(spans: list[dict]) -> set[int]:
+    """Return indices of raised numeric spans that look bibliographic.
+
+    PyMuPDF's superscript flag is preferred. A size/baseline fallback supports
+    publisher PDFs that only encode the visual position. Context guards avoid
+    removing exponents attached to numbers, one/two-letter variables or units,
+    and charged scientific notation.
+    """
+    if not spans:
+        return set()
+
+    texts = [_span_text(span) for span in spans]
+    size_counts: Counter = Counter()
+    for span, value in zip(spans, texts):
+        size = round(float(span.get("size", 0.0)), 1)
+        if size > 0 and value.strip():
+            size_counts[size] += max(1, len(value.strip()))
+    if not size_counts:
+        return set()
+    body_size = float(max(size_counts, key=lambda size: (size_counts[size], size)))
+
+    body_origins = []
+    for span, value in zip(spans, texts):
+        origin = span.get("origin")
+        size = float(span.get("size", 0.0))
+        if value.strip() and origin and size >= body_size * 0.90:
+            body_origins.extend([float(origin[1])] * max(1, len(value.strip())))
+    if body_origins:
+        ordered_origins = sorted(body_origins)
+        body_baseline = ordered_origins[len(ordered_origins) // 2]
+    else:
+        body_baseline = None
+
+    allowed_fragment = re.compile(r"^[\s\dA-Za-z,;–—-]+$")
+    citation_group = re.compile(
+        r"^\s*\d+[A-Za-z]?(?:\s*[,;–—-]\s*\d+[A-Za-z]?)*\s*$"
+    )
+
+    def visually_raised(index: int) -> bool:
+        span = spans[index]
+        if int(span.get("flags", 0)) & 1:
+            return True
+        size = float(span.get("size", 0.0))
+        origin = span.get("origin")
+        return bool(
+            body_baseline is not None
+            and origin
+            and 0 < size <= body_size * 0.84
+            and float(origin[1]) <= body_baseline - max(0.5, body_size * 0.10)
+        )
+
+    candidates = [
+        bool(value.strip() and allowed_fragment.fullmatch(value) and visually_raised(index))
+        for index, value in enumerate(texts)
+    ]
+    removable: set[int] = set()
+    index = 0
+    while index < len(spans):
+        if not candidates[index]:
+            index += 1
+            continue
+        end = index + 1
+        while end < len(spans) and candidates[end]:
+            end += 1
+        payload = "".join(texts[index:end])
+        if citation_group.fullmatch(payload):
+            prefix = "".join(texts[:index]).rstrip()
+            suffix = "".join(texts[end:]).lstrip()
+            previous_token = re.search(r"([A-Za-zÀ-ÖØ-öø-ÿ]+|\d+)$", prefix)
+            follows_scientific_token = bool(
+                previous_token
+                and (
+                    previous_token.group(1).isdigit()
+                    or len(previous_token.group(1)) <= 2
+                )
+            )
+            has_charge_or_unit_suffix = bool(suffix[:1] in "+⁺−⁻±%")
+            has_citation_context = bool(
+                prefix
+                and (
+                    prefix[-1] in ".,;:!?)]}"
+                    or (
+                        previous_token
+                        and previous_token.group(1).isalpha()
+                        and len(previous_token.group(1)) >= 3
+                    )
+                )
+            )
+            if has_citation_context and not follows_scientific_token and not has_charge_or_unit_suffix:
+                removable.update(range(index, end))
+        index = end
+    return removable
+
+
+def join_line_spans(spans: list[dict], filter_superscript_citations: bool = False) -> str:
     """Rebuild spaces inside and between PDF spans from glyph geometry."""
+    if filter_superscript_citations:
+        removable = _citation_like_superscript_spans(spans)
+        spans = [span for index, span in enumerate(spans) if index not in removable]
     if any(span.get("chars") for span in spans):
         return _join_positioned_chars(spans)
 
@@ -503,11 +630,18 @@ def _block_metadata(block: dict) -> dict | None:
                 if span.get("flags", 0) & 16 or "bold" in font_name:
                     bold_chars += char_count
         line_text = join_line_spans(spans)
+        speech_line_text = join_line_spans(spans, filter_superscript_citations=True)
         if line_text:
             lines_text.append(line_text)
             line_bbox = tuple(line.get("bbox"))
             line_bboxes.append(line_bbox)
-            line_items.append({"text": line_text, "bbox": line_bbox})
+            line_items.append(
+                {
+                    "text": line_text,
+                    "text_without_superscript_citations": speech_line_text,
+                    "bbox": line_bbox,
+                }
+            )
 
     text = "\n".join(lines_text).strip()
     if not text:
@@ -603,6 +737,7 @@ def order_selected_text(
     page_height: float,
     region: dict | None,
     layout_mode: str = "automatic",
+    filter_superscript_citations: bool = False,
 ) -> str:
     """Order selected text as automatic, one-column or forced two-column.
 
@@ -639,7 +774,11 @@ def order_selected_text(
             center_inside = x0 <= (lx0 + lx1) / 2 <= x1 and y0 <= (ly0 + ly1) / 2 <= y1
             if center_inside or intersection / line_area >= 0.10:
                 record = {
-                    "text": line["text"],
+                    "text": (
+                        line.get("text_without_superscript_citations", line["text"])
+                        if filter_superscript_citations
+                        else line["text"]
+                    ),
                     "bbox": line["bbox"],
                     "block_index": block_index,
                     "line_index": line_index,

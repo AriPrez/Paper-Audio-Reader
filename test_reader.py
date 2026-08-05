@@ -20,6 +20,7 @@ from parser import (  # noqa: E402
     join_line_spans,
     order_selected_text,
     remove_parenthetical_citations,
+    remove_unicode_superscript_citations,
     render_page_with_red_underlines,
     select_blocks_in_region,
 )
@@ -209,6 +210,107 @@ def test_pdf_span_spacing_is_reconstructed_from_geometry() -> None:
         {"text": "environment", "bbox": (80, 0, 125, 10), "size": 10},
     ]
     assert join_line_spans(spans) == "death varies, microenvironment"
+
+
+def test_raised_numeric_citation_spans_can_be_removed() -> None:
+    spans = [
+        {
+            "text": "Immune cells",
+            "bbox": (0, 90, 58, 101),
+            "origin": (0, 100),
+            "size": 10,
+            "flags": 0,
+        },
+        {
+            "text": "1,2–4",
+            "bbox": (58, 85, 75, 93),
+            "origin": (58, 93),
+            "size": 6,
+            "flags": 1,
+        },
+        {
+            "text": ".",
+            "bbox": (75, 90, 78, 101),
+            "origin": (75, 100),
+            "size": 10,
+            "flags": 0,
+        },
+    ]
+    assert "1,2–4" in join_line_spans(spans)
+    assert join_line_spans(spans, filter_superscript_citations=True) == "Immune cells."
+
+
+def test_raised_citation_geometry_works_without_pdf_flag() -> None:
+    spans = [
+        {"text": "reported.", "bbox": (0, 90, 42, 101), "origin": (0, 100), "size": 10},
+        {"text": "12", "bbox": (42, 84, 50, 92), "origin": (42, 92), "size": 6},
+        {"text": " Next", "bbox": (52, 90, 78, 101), "origin": (52, 100), "size": 10},
+    ]
+    assert join_line_spans(spans, filter_superscript_citations=True) == "reported. Next"
+
+
+@pytest.mark.parametrize(
+    ("base", "superscript", "suffix"),
+    [
+        ("10", "6", " cells"),
+        ("m", "2", " area"),
+        ("x", "2", " value"),
+        ("Ca", "2+", " channels"),
+    ],
+)
+def test_scientific_superscript_spans_are_preserved(
+    base: str, superscript: str, suffix: str
+) -> None:
+    spans = [
+        {"text": base, "bbox": (0, 90, 12, 101), "origin": (0, 100), "size": 10},
+        {
+            "text": superscript,
+            "bbox": (12, 84, 20, 92),
+            "origin": (12, 92),
+            "size": 6,
+            "flags": 1,
+        },
+        {"text": suffix, "bbox": (22, 90, 60, 101), "origin": (22, 100), "size": 10},
+    ]
+    cleaned = join_line_spans(spans, filter_superscript_citations=True)
+    assert superscript in cleaned
+
+
+def test_selection_uses_superscript_cleaned_line_only_when_enabled() -> None:
+    blocks = [
+        {
+            "lines": [
+                {
+                    "text": "Immune cells1,2.",
+                    "text_without_superscript_citations": "Immune cells.",
+                    "bbox": (50, 100, 250, 112),
+                }
+            ]
+        }
+    ]
+    region = {"x0": 0.05, "y0": 0.10, "x1": 0.50, "y1": 0.20}
+    original = order_selected_text(blocks, 600, 800, region, layout_mode="single_column")
+    filtered = order_selected_text(
+        blocks,
+        600,
+        800,
+        region,
+        layout_mode="single_column",
+        filter_superscript_citations=True,
+    )
+    assert original == "Immune cells1,2."
+    assert filtered == "Immune cells."
+
+
+def test_unicode_superscript_citations_preserve_scientific_notation() -> None:
+    raw = "Immune cells¹,²–⁴ remained at 10⁶ cells per m² with Ca²⁺ channels and x² values."
+    cleaned = remove_unicode_superscript_citations(raw)
+    assert "cells¹" not in cleaned
+    assert "10⁶" in cleaned
+    assert "m²" in cleaned
+    assert "Ca²⁺" in cleaned
+    assert "x²" in cleaned
+    assert "cells¹" in clean_academic_text(raw, filter_superscript_citations=False)
 
 
 def test_missing_spaces_inside_one_pdf_span_are_rebuilt_from_glyphs() -> None:
