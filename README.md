@@ -13,7 +13,8 @@ vocabulaire biomédical tout en retirant le bruit gênant pour la synthèse voca
 - Ordre de lecture sélectionnable : automatique, une colonne ou deux colonnes.
 - Conservation des termes comme `tumor-specific`, `single-cell` et `IFN-γ+`.
 - Filtres indépendants pour citations, URLs, légendes et équations.
-- Synthèse Edge TTS découpée en segments, avec timeout et cache par contenu.
+- Synthèse Edge TTS découpée en segments courts, avec timeout, durée MP3
+  vérifiable, téléchargement et cache par contenu.
 
 L'extraction et le rendu du PDF sont locaux. **Edge TTS est un service en
 ligne** : la génération audio nécessite une connexion Internet. Aucune clé API

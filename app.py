@@ -22,7 +22,7 @@ from parser import (
     render_page_with_red_underlines,
     select_blocks_in_region,
 )
-from tts_engine import VOICES, generate_speech
+from tts_engine import DEFAULT_CHUNK_CHARS, VOICES, chunk_text, estimate_mp3_duration, generate_speech
 
 
 st.set_page_config(
@@ -73,14 +73,18 @@ def reset_document(pdf_bytes: bytes) -> None:
 def cache_key(text: str, voice: str, speed: float) -> str:
     """Content-address audio cache key containing every audio input."""
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return f"{digest}:{voice}:{speed:.2f}"
+    return f"audio-v2:{digest}:{voice}:{speed:.2f}"
 
 
 def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> None:
     """Render generation controls and a cached audio player."""
     words = len(text.split())
     estimate = round(words / max(1.0, 150.0 * speed), 1) if words else 0
-    st.caption(f"{words} words · approximately {estimate:g} min · Edge TTS requires Internet")
+    speech_chunks = chunk_text(text, max_chars=DEFAULT_CHUNK_CHARS) if text else []
+    st.caption(
+        f"{words} words · approximately {estimate:g} min · "
+        f"{len(speech_chunks)} speech segment(s) · Edge TTS requires Internet"
+    )
     key = cache_key(text, voice, speed) if text else "empty"
 
     if st.button(
@@ -97,12 +101,26 @@ def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> 
                     voice=voice,
                     rate=speed,
                     timeout_seconds=35,
+                    max_chars=DEFAULT_CHUNK_CHARS,
                 )
             except Exception as exc:
                 st.error(str(exc))
 
     if key in st.session_state.audio_cache:
-        st.audio(st.session_state.audio_cache[key], format="audio/mp3")
+        audio = st.session_state.audio_cache[key]
+        duration = estimate_mp3_duration(audio)
+        if duration is not None:
+            minutes, seconds = divmod(round(duration), 60)
+            st.success(f"Complete MP3 ready · {minutes}:{seconds:02d}")
+        st.audio(audio, format="audio/mp3")
+        st.download_button(
+            "Download complete MP3",
+            data=audio,
+            file_name="paper-selection.mp3",
+            mime="audio/mpeg",
+            key=f"{key_prefix}_download_{key[:24]}",
+            use_container_width=True,
+        )
 
 
 def render_page_controls(total_pages: int) -> None:

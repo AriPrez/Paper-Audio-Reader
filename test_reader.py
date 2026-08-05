@@ -23,7 +23,7 @@ from parser import (  # noqa: E402
     render_page_with_red_underlines,
     select_blocks_in_region,
 )
-from tts_engine import chunk_text  # noqa: E402
+from tts_engine import DEFAULT_CHUNK_CHARS, chunk_text, estimate_mp3_duration  # noqa: E402
 
 
 def create_test_academic_pdf() -> bytes:
@@ -274,6 +274,23 @@ def test_tts_chunking_is_bounded_and_lossless() -> None:
     assert len(chunks) > 1
     assert all(len(chunk) <= 240 for chunk in chunks)
     assert " ".join(chunks) == text
+
+
+def test_default_tts_chunking_splits_a_full_paragraph() -> None:
+    text = " ".join(
+        f"Synthetic sentence {index} contains enough ordinary words for testing."
+        for index in range(30)
+    )
+    chunks = chunk_text(text)
+    assert len(chunks) >= 2
+    assert all(len(chunk) <= DEFAULT_CHUNK_CHARS for chunk in chunks)
+    assert " ".join(chunks) == text
+
+
+def test_edge_cbr_mp3_duration_estimate() -> None:
+    # MPEG-2 Layer III, bitrate index 6 = 48 kbps.
+    audio = bytes.fromhex("fff364c4") + bytes(5996)
+    assert estimate_mp3_duration(audio) == pytest.approx(1.0, abs=0.01)
 
 
 REAL_PDF = os.environ.get("IMMUNOLOGY_TEST_PDF")

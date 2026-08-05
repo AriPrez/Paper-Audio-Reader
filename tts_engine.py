@@ -29,7 +29,10 @@ class SpeechGenerationError(RuntimeError):
     """Raised when the online speech service cannot generate usable audio."""
 
 
-def chunk_text(text: str, max_chars: int = 2400) -> list[str]:
+DEFAULT_CHUNK_CHARS = 600
+
+
+def chunk_text(text: str, max_chars: int = DEFAULT_CHUNK_CHARS) -> list[str]:
     """Split long text on sentence/word boundaries for reliable synthesis."""
     compact = re.sub(r"\s+", " ", text or "").strip()
     if not compact:
@@ -81,6 +84,45 @@ def _strip_leading_id3(data: bytes) -> bytes:
     return data[10 + tag_size :]
 
 
+def estimate_mp3_duration(audio: bytes) -> float | None:
+    """Estimate CBR MP3 duration from the first valid MPEG frame.
+
+    Edge TTS currently returns constant-bitrate MP3 data, so this is accurate
+    enough to detect a truncated response without adding another dependency.
+    """
+    if not audio:
+        return None
+    offset = 0
+    if audio.startswith(b"ID3") and len(audio) >= 10:
+        size_bytes = audio[6:10]
+        offset = 10 + (
+            (size_bytes[0] & 0x7F) << 21
+            | (size_bytes[1] & 0x7F) << 14
+            | (size_bytes[2] & 0x7F) << 7
+            | (size_bytes[3] & 0x7F)
+        )
+
+    bitrate_tables = {
+        "mpeg1_layer3": [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+        "mpeg2_layer3": [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    }
+    scan_end = min(len(audio) - 4, offset + 65536)
+    for index in range(offset, max(offset, scan_end)):
+        header = int.from_bytes(audio[index : index + 4], "big")
+        if header & 0xFFE00000 != 0xFFE00000:
+            continue
+        version_id = (header >> 19) & 0b11
+        layer_id = (header >> 17) & 0b11
+        bitrate_index = (header >> 12) & 0b1111
+        if layer_id != 0b01 or bitrate_index in {0, 15}:
+            continue
+        table = bitrate_tables["mpeg1_layer3" if version_id == 0b11 else "mpeg2_layer3"]
+        bitrate_kbps = table[bitrate_index]
+        if bitrate_kbps:
+            return (len(audio) - offset) * 8 / (bitrate_kbps * 1000)
+    return None
+
+
 async def _generate_chunk(text: str, voice: str, rate: str, timeout_seconds: float) -> bytes:
     communicate = edge_tts.Communicate(text, voice, rate=rate)
     output = io.BytesIO()
@@ -110,7 +152,7 @@ async def generate_speech_async(
     voice: str = "en-US-ChristopherNeural",
     rate: str = "+0%",
     timeout_seconds: float = 35.0,
-    max_chars: int = 2400,
+    max_chars: int = DEFAULT_CHUNK_CHARS,
 ) -> bytes:
     """Generate MP3 bytes sequentially in bounded chunks."""
     if edge_tts is None:
@@ -131,7 +173,7 @@ def generate_speech(
     voice: str = "en-US-ChristopherNeural",
     rate: float = 1.0,
     timeout_seconds: float = 35.0,
-    max_chars: int = 2400,
+    max_chars: int = DEFAULT_CHUNK_CHARS,
 ) -> bytes:
     """Synchronous wrapper suitable for Streamlit's script thread."""
     percentage = round((float(rate) - 1.0) * 100)
