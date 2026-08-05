@@ -40,7 +40,17 @@ class SpeechGenerationError(RuntimeError):
     """Raised when the online speech service cannot generate usable audio."""
 
 
-DEFAULT_CHUNK_CHARS = 600
+# Each chunk is synthesised independently, so every boundary resets the voice's
+# intonation to neutral. At 600 characters that happened roughly every 25
+# seconds of speech, which is what made continuous prose sound recited. Longer
+# chunks measured no slower against the live service: generation time varies
+# with the service's mood, not with the length of the request.
+DEFAULT_CHUNK_CHARS = 2000
+
+# The same measurements showed occasional chunks stalling for tens of seconds
+# at random. Retrying once is far cheaper than failing a whole selection, since
+# a stalled request that is reissued usually returns immediately.
+CHUNK_ATTEMPTS = 2
 
 
 def chunk_text(text: str, max_chars: int = DEFAULT_CHUNK_CHARS) -> list[str]:
@@ -146,8 +156,14 @@ async def _generate_chunk(text: str, voice: str, rate: str, timeout_seconds: flo
     try:
         await asyncio.wait_for(consume(), timeout=timeout_seconds)
     except asyncio.TimeoutError as exc:
+        # Measured against the live service: it alternates between healthy
+        # windows and stretches where every request stalls, independently of the
+        # request's length. Blaming the connection sends the user looking in the
+        # wrong place — the network is usually fine.
         raise SpeechGenerationError(
-            f"La synthèse vocale a dépassé {timeout_seconds:g} secondes. Vérifie la connexion Internet."
+            f"Le service Edge TTS n'a pas répondu en {timeout_seconds:g} secondes. "
+            "Il limite les requêtes rapprochées : attends quelques instants et relance. "
+            "Vérifie la connexion Internet si le problème persiste."
         ) from exc
     except Exception as exc:
         raise SpeechGenerationError(f"Edge TTS est indisponible: {exc}") from exc
@@ -156,6 +172,25 @@ async def _generate_chunk(text: str, voice: str, rate: str, timeout_seconds: flo
     if len(audio) < 256:
         raise SpeechGenerationError("Edge TTS n'a renvoyé aucun audio exploitable.")
     return audio
+
+
+async def _generate_chunk_with_retry(
+    text: str,
+    voice: str,
+    rate: str,
+    timeout_seconds: float,
+    attempts: int = CHUNK_ATTEMPTS,
+) -> bytes:
+    """Generate one chunk, reissuing the request once if the service stalls."""
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return await _generate_chunk(text, voice, rate, timeout_seconds)
+        except SpeechGenerationError as exc:
+            last_error = exc
+            if attempt + 1 < max(1, attempts):
+                await asyncio.sleep(1.0)
+    raise last_error  # type: ignore[misc]
 
 
 async def generate_speech_async(
@@ -180,7 +215,7 @@ async def generate_speech_async(
 
     audio_parts = []
     for index, chunk in enumerate(chunks):
-        audio = await _generate_chunk(chunk, voice, rate, timeout_seconds)
+        audio = await _generate_chunk_with_retry(chunk, voice, rate, timeout_seconds)
         audio_parts.append(audio if index == 0 else _strip_leading_id3(audio))
         if progress is not None:
             progress(index + 1, len(chunks))

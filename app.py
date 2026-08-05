@@ -157,7 +157,7 @@ def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> 
                 text,
                 voice=voice,
                 rate=speed,
-                timeout_seconds=35,
+                timeout_seconds=60,
                 max_chars=DEFAULT_CHUNK_CHARS,
                 progress=lambda done, total: bar.progress(
                     done / total, text=f"Segment {done} of {total} generated"

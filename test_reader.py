@@ -411,10 +411,23 @@ def test_default_tts_chunking_splits_a_full_paragraph() -> None:
         f"Synthetic sentence {index} contains enough ordinary words for testing."
         for index in range(30)
     )
-    chunks = chunk_text(text)
+    # Sized against the limit rather than assuming any particular default, so
+    # raising DEFAULT_CHUNK_CHARS doesn't quietly stop exercising the split.
+    chunks = chunk_text(text, max_chars=400)
     assert len(chunks) >= 2
-    assert all(len(chunk) <= DEFAULT_CHUNK_CHARS for chunk in chunks)
+    assert all(len(chunk) <= 400 for chunk in chunks)
     assert " ".join(chunks) == text
+
+
+def test_default_chunking_keeps_a_normal_paragraph_whole() -> None:
+    """A boundary resets the voice's intonation, so an ordinary paragraph
+    should reach the service in one piece."""
+    paragraph = " ".join(
+        f"Synthetic sentence {index} contains enough ordinary words for testing."
+        for index in range(20)
+    )
+    assert len(paragraph) < DEFAULT_CHUNK_CHARS
+    assert chunk_text(paragraph) == [paragraph]
 
 
 def test_edge_cbr_mp3_duration_estimate() -> None:
@@ -479,6 +492,53 @@ def test_normalized_boxes_agree_with_region_selection() -> None:
 
     selected = select_blocks_in_region(blocks, page_width, page_height, region)
     assert [blocks[index]["text"] for index in highlighted] == [block["text"] for block in selected]
+
+
+async def _no_delay(_seconds: float) -> None:
+    """Skip the retry backoff; patching asyncio.sleep with a lambda that calls
+    asyncio.sleep would recurse into the patched function."""
+    return None
+
+
+def test_generate_speech_retries_a_stalled_chunk(monkeypatch) -> None:
+    """The service stalls on a chunk at random; reissuing usually returns at
+    once, and failing the whole selection instead would waste every chunk
+    already generated."""
+    import tts_engine
+
+    calls: list[str] = []
+
+    async def flaky_chunk(text: str, voice: str, rate: str, timeout_seconds: float) -> bytes:
+        calls.append(text)
+        if len(calls) == 1:
+            raise tts_engine.SpeechGenerationError("stalled")
+        return b"\xff\xf3\x64\xc4" + bytes(300)
+
+    monkeypatch.setattr(tts_engine, "edge_tts", object())
+    monkeypatch.setattr(tts_engine, "_generate_chunk", flaky_chunk)
+    monkeypatch.setattr(tts_engine.asyncio, "sleep", _no_delay)
+
+    audio = asyncio.run(generate_speech_async("One short sentence to read aloud."))
+    assert len(calls) == 2
+    assert len(audio) > 0
+
+
+def test_generate_speech_gives_up_after_the_retry(monkeypatch) -> None:
+    import tts_engine
+
+    calls: list[str] = []
+
+    async def always_fails(text: str, voice: str, rate: str, timeout_seconds: float) -> bytes:
+        calls.append(text)
+        raise tts_engine.SpeechGenerationError("service unavailable")
+
+    monkeypatch.setattr(tts_engine, "edge_tts", object())
+    monkeypatch.setattr(tts_engine, "_generate_chunk", always_fails)
+    monkeypatch.setattr(tts_engine.asyncio, "sleep", _no_delay)
+
+    with pytest.raises(tts_engine.SpeechGenerationError, match="service unavailable"):
+        asyncio.run(generate_speech_async("One short sentence to read aloud."))
+    assert len(calls) == tts_engine.CHUNK_ATTEMPTS
 
 
 def test_generate_speech_reports_progress_per_chunk(monkeypatch) -> None:
