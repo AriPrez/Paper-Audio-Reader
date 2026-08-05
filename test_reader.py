@@ -28,6 +28,7 @@ from parser import (  # noqa: E402
 )
 from tts_engine import (  # noqa: E402
     DEFAULT_CHUNK_CHARS,
+    VOICES,
     chunk_text,
     estimate_mp3_duration,
     generate_speech_async,
@@ -420,6 +421,18 @@ def test_edge_cbr_mp3_duration_estimate() -> None:
     # MPEG-2 Layer III, bitrate index 6 = 48 kbps.
     audio = bytes.fromhex("fff364c4") + bytes(5996)
     assert estimate_mp3_duration(audio) == pytest.approx(1.0, abs=0.01)
+
+
+def test_voice_catalogue_is_consistent() -> None:
+    """Offline shape check: a typo in a voice ID only fails at synthesis time,
+    which is the worst moment to discover it."""
+    assert len(set(VOICES.values())) == len(VOICES), "duplicate voice id"
+    for label, voice_id in VOICES.items():
+        assert voice_id.endswith("Neural"), voice_id
+        locale = "en-US" if label.startswith("English (US)") else "fr-FR"
+        assert voice_id.startswith(locale), (label, voice_id)
+    # The first entry is what the interface offers by default.
+    assert next(iter(VOICES.values())) == "en-US-AndrewMultilingualNeural"
 
 
 def test_normalized_block_boxes_are_clamped_to_the_unit_square() -> None:

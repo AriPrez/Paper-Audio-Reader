@@ -17,12 +17,22 @@ except ImportError:  # pragma: no cover - exercised only in incomplete installs
     edge_tts = None
 
 
+# Edge exposes several generations of voices under one API. The "Multilingual"
+# models are the recent ones and read continuous prose noticeably better; the
+# older neural voices are kept last so a preference can still be compared.
 VOICES = {
-    "English (US) - Christopher (Male)": "en-US-ChristopherNeural",
-    "English (US) - Jenny (Female)": "en-US-JennyNeural",
-    "English (US) - Eric (Male)": "en-US-EricNeural",
-    "Français (FR) - Henri (Homme)": "fr-FR-HenriNeural",
-    "Français (FR) - Denise (Femme)": "fr-FR-DeniseNeural",
+    "English (US) - Andrew (Male)": "en-US-AndrewMultilingualNeural",
+    "English (US) - Ava (Female)": "en-US-AvaMultilingualNeural",
+    "English (US) - Brian (Male)": "en-US-BrianMultilingualNeural",
+    "English (US) - Emma (Female)": "en-US-EmmaMultilingualNeural",
+    "Français (FR) - Remy (Homme)": "fr-FR-RemyMultilingualNeural",
+    "Français (FR) - Vivienne (Femme)": "fr-FR-VivienneMultilingualNeural",
+    "Français (FR) - Eloise (Femme)": "fr-FR-EloiseNeural",
+    "English (US) - Christopher (Male, older)": "en-US-ChristopherNeural",
+    "English (US) - Jenny (Female, older)": "en-US-JennyNeural",
+    "English (US) - Eric (Male, older)": "en-US-EricNeural",
+    "Français (FR) - Henri (Homme, ancienne)": "fr-FR-HenriNeural",
+    "Français (FR) - Denise (Femme, ancienne)": "fr-FR-DeniseNeural",
 }
 
 
