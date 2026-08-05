@@ -1,0 +1,40 @@
+# Sober scientific-tool theme: one accent, cool neutrals, high information density.
+# Colours live here rather than in app.py CSS so that light and dark modes stay
+# consistent without any per-mode stylesheet.
+
+[theme]
+base = "light"
+primaryColor = "#0F7C91"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6F7"
+textColor = "#16272D"
+borderColor = "#DCE3E6"
+linkColor = "#0F7C91"
+codeBackgroundColor = "#F3F6F7"
+baseFontSize = 15
+baseRadius = "small"
+buttonRadius = "small"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#F7F9FA"
+secondaryBackgroundColor = "#FFFFFF"
+borderColor = "#DCE3E6"
+
+[theme.dark]
+backgroundColor = "#0F1518"
+secondaryBackgroundColor = "#182126"
+textColor = "#E2EAED"
+primaryColor = "#4FBFD6"
+borderColor = "#2A373D"
+linkColor = "#4FBFD6"
+codeBackgroundColor = "#182126"
+
+[theme.dark.sidebar]
+backgroundColor = "#131B1F"
+secondaryBackgroundColor = "#0F1518"
+borderColor = "#2A373D"
+
+[server]
+maxUploadSize = 50

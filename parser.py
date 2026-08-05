@@ -697,6 +697,36 @@ def extract_page_blocks_for_selection(pdf_bytes: bytes, page_num: int) -> dict:
         doc.close()
 
 
+def normalized_block_boxes(
+    blocks: list[dict],
+    page_width: float,
+    page_height: float,
+) -> list[dict]:
+    """Return block bounding boxes in the 0-1 space used by the selector.
+
+    The interactive component previews which blocks a rectangle will capture,
+    so it needs the same geometry :func:`select_blocks_in_region` reasons about,
+    expressed in the normalized coordinates the component works in.
+    """
+    if page_width <= 0 or page_height <= 0:
+        return []
+    boxes = []
+    for block in blocks:
+        try:
+            bx0, by0, bx1, by1 = (float(value) for value in block["bbox"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        boxes.append(
+            {
+                "x0": max(0.0, min(1.0, bx0 / page_width)),
+                "y0": max(0.0, min(1.0, by0 / page_height)),
+                "x1": max(0.0, min(1.0, bx1 / page_width)),
+                "y1": max(0.0, min(1.0, by1 / page_height)),
+            }
+        )
+    return boxes
+
+
 def select_blocks_in_region(
     blocks: list[dict],
     page_width: float,

@@ -9,15 +9,22 @@ vocabulaire biomédical tout en retirant le bruit gênant pour la synthèse voca
 ## Fonctionnalités
 
 - Ordre de lecture adapté aux pages pleine largeur et à deux colonnes.
-- Sélection rectangulaire précise avec coordonnées X/Y renvoyées à Python.
+- Sélection rectangulaire précise avec coordonnées X/Y renvoyées à Python :
+  poignées de redimensionnement, déplacement, zoom, et aperçu en direct des
+  paragraphes capturés.
 - Ordre de lecture sélectionnable : automatique, une colonne ou deux colonnes.
 - Conservation des termes comme `tumor-specific`, `single-cell` et `IFN-γ+`.
 - Filtres indépendants pour citations entre crochets, entre parenthèses et
   numériques en exposant, ainsi que pour les URLs, légendes et équations.
 - Protection des exposants scientifiques tels que `10⁶`, `m²`, `Ca²⁺` et
   `x²` lors du retrait des appels bibliographiques en exposant.
-- Synthèse Edge TTS découpée en segments courts, avec timeout, durée MP3
-  vérifiable, téléchargement et cache par contenu.
+- Transcription éditable avant synthèse : le texte extrait peut être corrigé
+  dans le champ de droite sans redessiner le rectangle.
+- Synthèse Edge TTS découpée en segments courts, avec timeout, avancement
+  segment par segment, durée MP3 vérifiable, téléchargement et cache par
+  contenu.
+- Thème clair et sombre défini dans [`.streamlit/config.toml`](.streamlit/config.toml),
+  suivi également par le composant de sélection.
 
 L'extraction et le rendu du PDF sont locaux. **Edge TTS est un service en
 ligne** : la génération audio nécessite une connexion Internet. Aucune clé API
@@ -46,7 +53,9 @@ python -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Depuis la racine du dépôt, le lancement suivant fonctionne également :
+Depuis le répertoire parent, le lancement suivant fonctionne également, mais
+Streamlit ne lit `.streamlit/config.toml` que dans le répertoire courant : le
+thème n'est alors pas appliqué.
 
 ```bash
 streamlit run paper_audio_reader/app.py
@@ -58,7 +67,26 @@ habituellement `http://localhost:8501`.
 ## Lecture par rectangle
 
 Choisir une page, puis tracer un rectangle sur le rendu. Seuls les blocs de
-texte intersectant la zone sont nettoyés et proposés à la lecture.
+texte intersectant la zone sont nettoyés et proposés à la lecture. Les
+paragraphes qui seront réellement capturés s'éclairent pendant le tracé : le
+composant applique exactement la règle de `select_blocks_in_region` (centre du
+bloc dans la zone, ou 10 % de sa surface au moins), donc l'aperçu ne ment pas.
+
+| Geste | Effet |
+| --- | --- |
+| Glisser | Tracer un rectangle |
+| Cliquer un paragraphe | Le sélectionner entièrement |
+| Cliquer une zone vide | Effacer la sélection |
+| Glisser une poignée | Ajuster un bord ou un coin |
+| Glisser l'intérieur | Déplacer la sélection |
+| `Ctrl` + molette, ou `+` / `−` | Zoomer |
+| Flèches | Déplacer d'un pas (`Alt` : pas fin) |
+| `Maj` + flèches | Redimensionner |
+| `Échap` | Effacer |
+
+Le texte extrait reste **modifiable** avant la synthèse : corriger une
+extraction bancale dans le champ de droite est plus rapide que de retracer le
+rectangle.
 
 Pour un paragraphe en deux colonnes, choisir **Two columns: left, then right**.
 Le milieu du rectangle sert de séparation : toute la colonne gauche est lue

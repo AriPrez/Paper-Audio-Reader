@@ -7,6 +7,7 @@ boundary or exercise :func:`chunk_text`, which is fully offline.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import io
 import re
 
@@ -153,8 +154,14 @@ async def generate_speech_async(
     rate: str = "+0%",
     timeout_seconds: float = 35.0,
     max_chars: int = DEFAULT_CHUNK_CHARS,
+    progress: Callable[[int, int], None] | None = None,
 ) -> bytes:
-    """Generate MP3 bytes sequentially in bounded chunks."""
+    """Generate MP3 bytes sequentially in bounded chunks.
+
+    ``progress`` is called with ``(completed_chunks, total_chunks)`` after each
+    segment, so a caller can report advancement on long selections instead of
+    showing an indeterminate spinner for several minutes.
+    """
     if edge_tts is None:
         raise ImportError("Installe edge-tts avec `pip install edge-tts`.")
     chunks = chunk_text(text, max_chars=max_chars)
@@ -165,6 +172,8 @@ async def generate_speech_async(
     for index, chunk in enumerate(chunks):
         audio = await _generate_chunk(chunk, voice, rate, timeout_seconds)
         audio_parts.append(audio if index == 0 else _strip_leading_id3(audio))
+        if progress is not None:
+            progress(index + 1, len(chunks))
     return b"".join(audio_parts)
 
 
@@ -174,6 +183,7 @@ def generate_speech(
     rate: float = 1.0,
     timeout_seconds: float = 35.0,
     max_chars: int = DEFAULT_CHUNK_CHARS,
+    progress: Callable[[int, int], None] | None = None,
 ) -> bytes:
     """Synchronous wrapper suitable for Streamlit's script thread."""
     percentage = round((float(rate) - 1.0) * 100)
@@ -184,6 +194,7 @@ def generate_speech(
         rate=rate_string,
         timeout_seconds=timeout_seconds,
         max_chars=max_chars,
+        progress=progress,
     )
 
     try:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 import sys
@@ -18,13 +19,19 @@ from parser import (  # noqa: E402
     extract_sections_with_bboxes,
     is_true_section_header,
     join_line_spans,
+    normalized_block_boxes,
     order_selected_text,
     remove_parenthetical_citations,
     remove_unicode_superscript_citations,
     render_page_with_red_underlines,
     select_blocks_in_region,
 )
-from tts_engine import DEFAULT_CHUNK_CHARS, chunk_text, estimate_mp3_duration  # noqa: E402
+from tts_engine import (  # noqa: E402
+    DEFAULT_CHUNK_CHARS,
+    chunk_text,
+    estimate_mp3_duration,
+    generate_speech_async,
+)
 
 
 def create_test_academic_pdf() -> bytes:
@@ -413,6 +420,73 @@ def test_edge_cbr_mp3_duration_estimate() -> None:
     # MPEG-2 Layer III, bitrate index 6 = 48 kbps.
     audio = bytes.fromhex("fff364c4") + bytes(5996)
     assert estimate_mp3_duration(audio) == pytest.approx(1.0, abs=0.01)
+
+
+def test_normalized_block_boxes_are_clamped_to_the_unit_square() -> None:
+    blocks = [
+        {"bbox": (61.2, 79.2, 306.0, 396.0)},
+        {"bbox": (-5.0, -5.0, 700.0, 900.0)},
+    ]
+    boxes = normalized_block_boxes(blocks, 612.0, 792.0)
+    assert boxes[0] == pytest.approx({"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5}, rel=1e-6)
+    assert boxes[1] == {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+
+
+def test_normalized_block_boxes_skip_unusable_geometry() -> None:
+    assert normalized_block_boxes([{"bbox": (0, 0, 1, 1)}], 0.0, 792.0) == []
+    assert normalized_block_boxes([{"text": "no bbox"}], 612.0, 792.0) == []
+    assert normalized_block_boxes([{"bbox": ("a", 0, 1, 1)}], 612.0, 792.0) == []
+
+
+def test_normalized_boxes_agree_with_region_selection() -> None:
+    """The component highlights blocks from normalized boxes using the rule in
+    select_blocks_in_region. Both must agree, or the preview lies."""
+    page_width, page_height = 612.0, 792.0
+    blocks = [
+        {"bbox": (61.2, 79.2, 306.0, 158.4), "text": "inside"},
+        {"bbox": (61.2, 633.6, 306.0, 712.8), "text": "far below"},
+        {"bbox": (275.4, 79.2, 520.2, 158.4), "text": "straddling the edge"},
+    ]
+    region = {"x0": 0.05, "y0": 0.05, "x1": 0.5, "y1": 0.3}
+    boxes = normalized_block_boxes(blocks, page_width, page_height)
+
+    minimum_area = 1 / (page_width * page_height)
+    highlighted = []
+    for index, box in enumerate(boxes):
+        overlap_x = max(0.0, min(region["x1"], box["x1"]) - max(region["x0"], box["x0"]))
+        overlap_y = max(0.0, min(region["y1"], box["y1"]) - max(region["y0"], box["y0"]))
+        area = max(minimum_area, (box["x1"] - box["x0"]) * (box["y1"] - box["y0"]))
+        centre_x = (box["x0"] + box["x1"]) / 2
+        centre_y = (box["y0"] + box["y1"]) / 2
+        centre_inside = (
+            region["x0"] <= centre_x <= region["x1"] and region["y0"] <= centre_y <= region["y1"]
+        )
+        if centre_inside or (overlap_x * overlap_y) / area >= 0.10:
+            highlighted.append(index)
+
+    selected = select_blocks_in_region(blocks, page_width, page_height, region)
+    assert [blocks[index]["text"] for index in highlighted] == [block["text"] for block in selected]
+
+
+def test_generate_speech_reports_progress_per_chunk(monkeypatch) -> None:
+    import tts_engine
+
+    async def fake_chunk(text: str, voice: str, rate: str, timeout_seconds: float) -> bytes:
+        return b"\xff\xf3\x64\xc4" + bytes(300)
+
+    monkeypatch.setattr(tts_engine, "edge_tts", object())
+    monkeypatch.setattr(tts_engine, "_generate_chunk", fake_chunk)
+
+    reported: list[tuple[int, int]] = []
+    text = ". ".join(f"Sentence number {index} about tumor-specific cells" for index in range(60))
+    audio = asyncio.run(
+        generate_speech_async(text, progress=lambda done, total: reported.append((done, total)))
+    )
+
+    expected = len(chunk_text(text))
+    assert expected >= 2
+    assert reported == [(index + 1, expected) for index in range(expected)]
+    assert len(audio) > 0
 
 
 REAL_PDF = os.environ.get("IMMUNOLOGY_TEST_PDF")

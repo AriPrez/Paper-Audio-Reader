@@ -4,60 +4,180 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
+      /* Colours are overridden at render time from the Streamlit theme so that
+         the component follows light and dark mode; these are only fallbacks. */
+      :root {
+        --accent: #0f7c91;
+        --border: #dce3e6;
+        --surface: #f3f6f7;
+        --text: #16272d;
+        --font: system-ui, -apple-system, sans-serif;
+      }
       * { box-sizing: border-box; }
       html, body { margin: 0; padding: 0; overflow: hidden; background: transparent; }
-      body { font-family: system-ui, -apple-system, sans-serif; }
-      #frame { width: 100%; display: flex; flex-direction: column; align-items: center; }
+      body { font-family: var(--font); color: var(--text); }
+
+      #frame { width: 100%; display: flex; flex-direction: column; gap: 6px; }
+
+      #toolbar { display: flex; align-items: center; gap: 6px; }
+      .tool {
+        appearance: none;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1;
+        padding: 6px 9px;
+        color: var(--text);
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      .tool:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+      .tool:disabled { opacity: .4; cursor: default; }
+      .tool:focus-visible, #viewport:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      #zoomLevel {
+        font-size: 12px;
+        opacity: .7;
+        min-width: 44px;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+      #spacer { flex: 1; }
+
+      #viewport {
+        position: relative;
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+        overscroll-behavior: contain;
+      }
       #canvas {
         position: relative;
-        display: inline-block;
-        max-width: 100%;
+        display: block;
+        margin: 0 auto;
+        width: max-content;
         cursor: crosshair;
         touch-action: none;
-        border: 2px solid #00a9d6;
-        border-radius: 7px;
-        overflow: hidden;
-        box-shadow: 0 4px 18px rgba(0, 169, 214, 0.20);
       }
-      #pdf { display: block; max-width: 100%; height: auto; pointer-events: none; user-select: none; }
+      #pdf { display: block; width: 100%; height: auto; pointer-events: none; user-select: none; }
+
+      #blocks { position: absolute; inset: 0; pointer-events: none; }
+      .block {
+        position: absolute;
+        border-radius: 2px;
+        transition: background-color .08s linear, box-shadow .08s linear;
+      }
+      .block.covered { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+      .block.hovered { box-shadow: inset 0 0 0 1px var(--accent); }
+
       #selection {
         position: absolute;
         display: none;
-        pointer-events: none;
-        border: 2px dashed #ef315d;
-        background: rgba(239, 49, 93, 0.18);
-        box-shadow: 0 0 8px rgba(239, 49, 93, 0.45);
+        cursor: move;
+        border: 1.5px solid var(--accent);
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
       }
-      #info { padding: 7px 4px 1px; color: #16728a; font-size: 13px; font-weight: 650; }
+      .handle {
+        position: absolute;
+        width: 10px;
+        height: 10px;
+        background: var(--accent);
+        border: 1.5px solid #fff;
+        border-radius: 2px;
+      }
+      .handle[data-handle="nw"] { left: -5px; top: -5px; cursor: nwse-resize; }
+      .handle[data-handle="ne"] { right: -5px; top: -5px; cursor: nesw-resize; }
+      .handle[data-handle="sw"] { left: -5px; bottom: -5px; cursor: nesw-resize; }
+      .handle[data-handle="se"] { right: -5px; bottom: -5px; cursor: nwse-resize; }
+      .handle[data-handle="n"] { left: 50%; top: -5px; margin-left: -5px; cursor: ns-resize; }
+      .handle[data-handle="s"] { left: 50%; bottom: -5px; margin-left: -5px; cursor: ns-resize; }
+      .handle[data-handle="w"] { left: -5px; top: 50%; margin-top: -5px; cursor: ew-resize; }
+      .handle[data-handle="e"] { right: -5px; top: 50%; margin-top: -5px; cursor: ew-resize; }
+
+      #info { color: var(--text); opacity: .62; font-size: 12.5px; font-variant-numeric: tabular-nums; }
     </style>
   </head>
   <body>
     <div id="frame">
-      <div id="canvas">
-        <img id="pdf" alt="Rendered PDF page" draggable="false" />
-        <div id="selection"></div>
+      <div id="toolbar">
+        <button class="tool" id="zoomOut" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+        <span id="zoomLevel">100%</span>
+        <button class="tool" id="zoomIn" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+        <button class="tool" id="fitWidth" type="button">Fit width</button>
+        <button class="tool" id="fitPage" type="button">Fit page</button>
+        <span id="spacer"></span>
+        <button class="tool" id="clear" type="button" disabled>Clear</button>
       </div>
-      <div id="info">Drag a rectangle over the text to read</div>
+      <div
+        id="viewport"
+        tabindex="0"
+        role="application"
+        aria-label="Drag a rectangle over the page to choose the text to read. Arrow keys move the selection, shift and arrow keys resize it, Escape clears it."
+      >
+        <div id="canvas">
+          <img id="pdf" alt="Rendered PDF page" draggable="false" />
+          <div id="blocks"></div>
+          <div id="selection">
+            <div class="handle" data-handle="nw"></div>
+            <div class="handle" data-handle="n"></div>
+            <div class="handle" data-handle="ne"></div>
+            <div class="handle" data-handle="e"></div>
+            <div class="handle" data-handle="se"></div>
+            <div class="handle" data-handle="s"></div>
+            <div class="handle" data-handle="sw"></div>
+            <div class="handle" data-handle="w"></div>
+          </div>
+        </div>
+      </div>
+      <div id="info" aria-live="polite">Drag a rectangle over the text, or click a paragraph.</div>
     </div>
     <script>
       const frame = document.getElementById("frame");
+      const viewport = document.getElementById("viewport");
       const canvas = document.getElementById("canvas");
       const image = document.getElementById("pdf");
+      const blockLayer = document.getElementById("blocks");
       const selection = document.getElementById("selection");
       const info = document.getElementById("info");
-      let start = null;
-      let current = null;
-      let lastImage = null;
+      const zoomLabel = document.getElementById("zoomLevel");
+      const clearButton = document.getElementById("clear");
 
-      function send(type, payload = {}) {
+      const MIN_SIDE = 0.01; // a drag shorter than this counts as a click
+      const ZOOM_MIN = 0.25;
+      const ZOOM_MAX = 5;
+
+      let blocks = [];
+      let blockNodes = [];
+      let pageWidth = 612;
+      let pageHeight = 792;
+      let maxHeight = 720;
+      let region = null;      // committed rectangle, normalized 0-1
+      let drag = null;        // {mode, anchor, origin, moved}
+      let zoom = 1;
+      let lastImage = null;
+      let sendTimer = null;
+      let clearNonce = 0;
+
+      function post(type, payload = {}) {
         window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, "*");
       }
 
       function resizeFrame() {
-        requestAnimationFrame(() => send("streamlit:setFrameHeight", { height: frame.scrollHeight + 4 }));
+        requestAnimationFrame(() => post("streamlit:setFrameHeight", { height: frame.scrollHeight + 4 }));
       }
 
-      function clamp(value) { return Math.max(0, Math.min(1, value)); }
+      function clamp(value, low = 0, high = 1) { return Math.max(low, Math.min(high, value)); }
+
+      function normalise(raw) {
+        if (!raw) return null;
+        return {
+          x0: Math.min(raw.x0, raw.x1),
+          y0: Math.min(raw.y0, raw.y1),
+          x1: Math.max(raw.x0, raw.x1),
+          y1: Math.max(raw.y0, raw.y1),
+        };
+      }
 
       function pointFromEvent(event) {
         const rect = image.getBoundingClientRect();
@@ -67,72 +187,314 @@
         };
       }
 
-      function draw(region) {
-        current = region;
-        if (!region) {
+      /* Mirrors select_blocks_in_region in parser.py: a block counts as selected
+         when its centre is inside the rectangle or at least 10% of its area is.
+         Ratios are scale invariant, so normalized coordinates give the same
+         answer Python will compute in page units. */
+      function coveredBlocks(rect) {
+        if (!rect) return [];
+        if ((rect.x1 - rect.x0) * pageWidth < 1 || (rect.y1 - rect.y0) * pageHeight < 1) return [];
+        const minimumArea = 1 / Math.max(1, pageWidth * pageHeight);
+        const covered = [];
+        blocks.forEach((block, index) => {
+          const overlapX = Math.max(0, Math.min(rect.x1, block.x1) - Math.max(rect.x0, block.x0));
+          const overlapY = Math.max(0, Math.min(rect.y1, block.y1) - Math.max(rect.y0, block.y0));
+          const area = Math.max(minimumArea, (block.x1 - block.x0) * (block.y1 - block.y0));
+          const centreX = (block.x0 + block.x1) / 2;
+          const centreY = (block.y0 + block.y1) / 2;
+          const centreInside =
+            rect.x0 <= centreX && centreX <= rect.x1 && rect.y0 <= centreY && centreY <= rect.y1;
+          if (centreInside || (overlapX * overlapY) / area >= 0.1) covered.push(index);
+        });
+        return covered;
+      }
+
+      function blockAtPoint(point) {
+        for (let index = blocks.length - 1; index >= 0; index -= 1) {
+          const block = blocks[index];
+          if (point.x >= block.x0 && point.x <= block.x1 && point.y >= block.y0 && point.y <= block.y1) {
+            return index;
+          }
+        }
+        return -1;
+      }
+
+      function buildBlockLayer() {
+        blockLayer.replaceChildren();
+        blockNodes = blocks.map((block) => {
+          const node = document.createElement("div");
+          node.className = "block";
+          node.style.left = `${block.x0 * 100}%`;
+          node.style.top = `${block.y0 * 100}%`;
+          node.style.width = `${(block.x1 - block.x0) * 100}%`;
+          node.style.height = `${(block.y1 - block.y0) * 100}%`;
+          blockLayer.appendChild(node);
+          return node;
+        });
+      }
+
+      function paint(rect, hoveredIndex = -1) {
+        const covered = new Set(coveredBlocks(rect));
+        blockNodes.forEach((node, index) => {
+          node.classList.toggle("covered", covered.has(index));
+          node.classList.toggle("hovered", index === hoveredIndex && !covered.has(index));
+        });
+
+        if (!rect) {
           selection.style.display = "none";
-          info.textContent = "Drag a rectangle over the text to read";
+          clearButton.disabled = true;
+          info.textContent = "Drag a rectangle over the text, or click a paragraph.";
           return;
         }
-        const x0 = Math.min(region.x0, region.x1);
-        const x1 = Math.max(region.x0, region.x1);
-        const y0 = Math.min(region.y0, region.y1);
-        const y1 = Math.max(region.y0, region.y1);
-        selection.style.left = `${x0 * 100}%`;
-        selection.style.top = `${y0 * 100}%`;
-        selection.style.width = `${(x1 - x0) * 100}%`;
-        selection.style.height = `${(y1 - y0) * 100}%`;
+        selection.style.left = `${rect.x0 * 100}%`;
+        selection.style.top = `${rect.y0 * 100}%`;
+        selection.style.width = `${(rect.x1 - rect.x0) * 100}%`;
+        selection.style.height = `${(rect.y1 - rect.y0) * 100}%`;
         selection.style.display = "block";
-        info.textContent = `Selected: X ${Math.round(x0 * 100)}-${Math.round(x1 * 100)}%, Y ${Math.round(y0 * 100)}-${Math.round(y1 * 100)}%`;
+        clearButton.disabled = false;
+        const count = covered.size;
+        info.textContent =
+          `${count} paragraph${count === 1 ? "" : "s"} covered · ` +
+          `${Math.round((rect.x1 - rect.x0) * 100)}% × ${Math.round((rect.y1 - rect.y0) * 100)}% of the page`;
       }
+
+      function commit(rect, immediate = true) {
+        region = rect;
+        paint(region);
+        if (sendTimer) clearTimeout(sendTimer);
+        // Streamlit substitutes the component's `default` for a null value, so
+        // clearing has to be an explicit payload rather than null. The nonce
+        // keeps two consecutive clears distinguishable, which is what makes the
+        // second one rerun the script.
+        const send = () => {
+          clearNonce += 1;
+          post("streamlit:setComponentValue", {
+            value: region ? { ...region } : { cleared: true, nonce: clearNonce },
+          });
+        };
+        if (immediate) send();
+        else sendTimer = setTimeout(send, 450);
+      }
+
+      /* ---- zoom ------------------------------------------------------- */
+
+      function fitWidthZoom() { return 1; }
+
+      function fitPageZoom() {
+        const naturalRatio = image.naturalHeight / Math.max(1, image.naturalWidth);
+        const widthAtFit = viewport.clientWidth - 2;
+        if (!naturalRatio || widthAtFit <= 0) return 1;
+        return clamp((maxHeight - 2) / (widthAtFit * naturalRatio), ZOOM_MIN, 1);
+      }
+
+      function applyZoom(next) {
+        zoom = clamp(next, ZOOM_MIN, ZOOM_MAX);
+        const base = viewport.clientWidth - 2;
+        canvas.style.width = `${Math.max(120, base * zoom)}px`;
+        zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+      }
+
+      function sizeViewport() {
+        const naturalRatio = image.naturalHeight / Math.max(1, image.naturalWidth);
+        const height = (viewport.clientWidth - 2) * zoom * naturalRatio;
+        viewport.style.height = `${Math.max(220, Math.min(maxHeight, height + 2))}px`;
+        resizeFrame();
+      }
+
+      document.getElementById("zoomIn").addEventListener("click", () => {
+        applyZoom(zoom * 1.25); sizeViewport();
+      });
+      document.getElementById("zoomOut").addEventListener("click", () => {
+        applyZoom(zoom / 1.25); sizeViewport();
+      });
+      document.getElementById("fitWidth").addEventListener("click", () => {
+        applyZoom(fitWidthZoom()); sizeViewport();
+      });
+      document.getElementById("fitPage").addEventListener("click", () => {
+        applyZoom(fitPageZoom()); sizeViewport();
+      });
+      document.getElementById("clear").addEventListener("click", () => commit(null));
+
+      viewport.addEventListener(
+        "wheel",
+        (event) => {
+          if (!event.ctrlKey) return;
+          event.preventDefault();
+          applyZoom(zoom * (event.deltaY < 0 ? 1.1 : 1 / 1.1));
+          sizeViewport();
+        },
+        { passive: false }
+      );
+
+      /* ---- pointer interaction ---------------------------------------- */
 
       canvas.addEventListener("pointerdown", (event) => {
         if (!image.complete) return;
         event.preventDefault();
+        viewport.focus({ preventScroll: true });
         canvas.setPointerCapture(event.pointerId);
-        start = pointFromEvent(event);
-        draw({ x0: start.x, y0: start.y, x1: start.x, y1: start.y });
+        const point = pointFromEvent(event);
+        const handle = event.target.dataset ? event.target.dataset.handle : undefined;
+
+        if (handle && region) {
+          drag = { mode: "resize", handle, origin: { ...region }, moved: false };
+        } else if (region && event.target === selection) {
+          drag = { mode: "move", anchor: point, origin: { ...region }, moved: false };
+        } else {
+          drag = { mode: "draw", anchor: point, moved: false };
+          paint(normalise({ x0: point.x, y0: point.y, x1: point.x, y1: point.y }));
+        }
       });
 
       canvas.addEventListener("pointermove", (event) => {
-        if (!start) return;
         const point = pointFromEvent(event);
-        draw({ x0: start.x, y0: start.y, x1: point.x, y1: point.y });
+        if (!drag) {
+          if (!region) paint(region, blockAtPoint(point));
+          return;
+        }
+        drag.moved = true;
+
+        if (drag.mode === "draw") {
+          paint(normalise({ x0: drag.anchor.x, y0: drag.anchor.y, x1: point.x, y1: point.y }));
+          return;
+        }
+        if (drag.mode === "move") {
+          const width = drag.origin.x1 - drag.origin.x0;
+          const height = drag.origin.y1 - drag.origin.y0;
+          const x0 = clamp(drag.origin.x0 + (point.x - drag.anchor.x), 0, 1 - width);
+          const y0 = clamp(drag.origin.y0 + (point.y - drag.anchor.y), 0, 1 - height);
+          paint({ x0, y0, x1: x0 + width, y1: y0 + height });
+          return;
+        }
+        const next = { ...drag.origin };
+        if (drag.handle.includes("n")) next.y0 = point.y;
+        if (drag.handle.includes("s")) next.y1 = point.y;
+        if (drag.handle.includes("w")) next.x0 = point.x;
+        if (drag.handle.includes("e")) next.x1 = point.x;
+        paint(normalise(next));
       });
 
       canvas.addEventListener("pointerup", (event) => {
-        if (!start) return;
+        if (!drag) return;
         const point = pointFromEvent(event);
-        const value = {
-          x0: Math.min(start.x, point.x), y0: Math.min(start.y, point.y),
-          x1: Math.max(start.x, point.x), y1: Math.max(start.y, point.y),
-        };
-        start = null;
-        if (value.x1 - value.x0 < 0.01 || value.y1 - value.y0 < 0.01) {
-          draw(null);
-          send("streamlit:setComponentValue", { value: null });
+        const finished = drag;
+        drag = null;
+
+        if (finished.mode === "draw") {
+          const rect = normalise({ x0: finished.anchor.x, y0: finished.anchor.y, x1: point.x, y1: point.y });
+          if (rect.x1 - rect.x0 < MIN_SIDE || rect.y1 - rect.y0 < MIN_SIDE) {
+            // Treated as a click: select the paragraph under the pointer.
+            const index = blockAtPoint(point);
+            commit(index >= 0 ? { ...blocks[index] } : null);
+            return;
+          }
+          commit(rect);
           return;
         }
-        draw(value);
-        send("streamlit:setComponentValue", { value });
+        if (finished.mode === "move") {
+          const width = finished.origin.x1 - finished.origin.x0;
+          const height = finished.origin.y1 - finished.origin.y0;
+          const x0 = clamp(finished.origin.x0 + (point.x - finished.anchor.x), 0, 1 - width);
+          const y0 = clamp(finished.origin.y0 + (point.y - finished.anchor.y), 0, 1 - height);
+          commit({ x0, y0, x1: x0 + width, y1: y0 + height });
+          return;
+        }
+        const next = { ...finished.origin };
+        if (finished.handle.includes("n")) next.y0 = point.y;
+        if (finished.handle.includes("s")) next.y1 = point.y;
+        if (finished.handle.includes("w")) next.x0 = point.x;
+        if (finished.handle.includes("e")) next.x1 = point.x;
+        const resized = normalise(next);
+        commit(resized.x1 - resized.x0 < MIN_SIDE || resized.y1 - resized.y0 < MIN_SIDE ? null : resized);
       });
+
+      canvas.addEventListener("pointerleave", () => {
+        if (!drag && !region) paint(region, -1);
+      });
+
+      /* ---- keyboard ---------------------------------------------------- */
+
+      const ARROWS = {
+        ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
+      };
+
+      viewport.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && region) {
+          event.preventDefault();
+          commit(null);
+          return;
+        }
+        const direction = ARROWS[event.key];
+        if (!direction || !region) return;
+        event.preventDefault();
+        const step = event.altKey ? 0.002 : 0.01; // alt gives a finer nudge
+        const [dx, dy] = direction;
+        let next;
+        if (event.shiftKey) {
+          next = normalise({
+            x0: region.x0, y0: region.y0,
+            x1: clamp(region.x1 + dx * step), y1: clamp(region.y1 + dy * step),
+          });
+        } else {
+          const width = region.x1 - region.x0;
+          const height = region.y1 - region.y0;
+          const x0 = clamp(region.x0 + dx * step, 0, 1 - width);
+          const y0 = clamp(region.y0 + dy * step, 0, 1 - height);
+          next = { x0, y0, x1: x0 + width, y1: y0 + height };
+        }
+        // Debounced: holding an arrow key must not trigger a rerun per frame.
+        commit(next, false);
+      });
+
+      /* ---- theme and render ------------------------------------------- */
+
+      function applyTheme(theme) {
+        if (!theme) return;
+        const root = document.documentElement.style;
+        if (theme.primaryColor) root.setProperty("--accent", theme.primaryColor);
+        if (theme.textColor) root.setProperty("--text", theme.textColor);
+        if (theme.secondaryBackgroundColor) root.setProperty("--surface", theme.secondaryBackgroundColor);
+        if (theme.borderColor) root.setProperty("--border", theme.borderColor);
+        else if (theme.secondaryBackgroundColor) root.setProperty("--border", theme.secondaryBackgroundColor);
+        if (theme.font) root.setProperty("--font", theme.font);
+      }
 
       window.addEventListener("message", (event) => {
         if (event.data.type !== "streamlit:render") return;
         const args = event.data.args || {};
-        const requestedWidth = Math.max(320, Number(args.width || 620));
-        image.style.width = `${requestedWidth}px`;
-        if (args.image && args.image !== lastImage) {
+        applyTheme(event.data.theme);
+
+        blocks = Array.isArray(args.blocks) ? args.blocks : [];
+        pageWidth = Number(args.page_width) || pageWidth;
+        pageHeight = Number(args.page_height) || pageHeight;
+        maxHeight = Math.max(240, Number(args.max_height) || 720);
+
+        const isNewImage = args.image && args.image !== lastImage;
+        if (isNewImage) {
           lastImage = args.image;
-          image.onload = () => { draw(args.initial || current); resizeFrame(); };
+          image.onload = () => {
+            buildBlockLayer();
+            region = args.initial || null;
+            applyZoom(zoom);
+            sizeViewport();
+            paint(region);
+          };
           image.src = args.image;
         } else {
-          draw(current || args.initial || null);
-          resizeFrame();
+          // `initial` is only a seed for a fresh page image. Re-adopting it here
+          // would resurrect a cleared rectangle: Python computes the render args
+          // before it learns the selection was cleared, so the very next render
+          // still carries the stale box.
+          buildBlockLayer();
+          applyZoom(zoom);
+          sizeViewport();
+          paint(region);
         }
       });
 
-      send("streamlit:componentReady", { apiVersion: 1 });
+      window.addEventListener("resize", () => { applyZoom(zoom); sizeViewport(); });
+
+      post("streamlit:componentReady", { apiVersion: 1 });
       resizeFrame();
     </script>
   </body>

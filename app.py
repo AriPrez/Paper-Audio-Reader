@@ -18,6 +18,7 @@ from canvas_select import render_crosshair_canvas_selector
 from parser import (
     clean_academic_text,
     extract_page_blocks_for_selection,
+    normalized_block_boxes,
     order_selected_text,
     render_page_with_red_underlines,
     select_blocks_in_region,
@@ -30,24 +31,43 @@ st.set_page_config(
     page_icon="🎧",
     layout="wide",
     initial_sidebar_state="expanded",
+    menu_items={
+        "Get Help": "https://github.com/AriPrez/Paper-Audio-Reader#readme",
+        "Report a bug": "https://github.com/AriPrez/Paper-Audio-Reader/issues",
+        "About": (
+            "**Paper Audio Reader** — read scientific PDFs aloud without citation noise.\n\n"
+            "PDF parsing and rendering are local; speech uses the online Microsoft Edge TTS "
+            "service. MIT licensed."
+        ),
+    },
 )
 
+# Layout and typography only. Every colour comes from .streamlit/config.toml so
+# that light and dark modes stay correct without a second stylesheet.
 st.markdown(
     """
     <style>
-      .main .block-container { padding-top: 1.1rem; padding-bottom: 2rem; max-width: 98%; }
-      .stButton > button { border-radius: 8px; font-weight: 650; }
-      .reader-note { color: #58717a; font-size: .88rem; }
+      .block-container { padding-top: 3.4rem; padding-bottom: 3rem; max-width: 1600px; }
+      section[data-testid="stSidebar"] .block-container { padding-top: 1.4rem; }
+      h1, h2, h3 { letter-spacing: -0.01em; }
+      h3 { margin-bottom: .35rem; }
+      .stButton > button { font-weight: 600; }
+      .stTextArea textarea { line-height: 1.62; font-size: .95rem; }
+      .stAudio { width: 100%; }
+      div[data-testid="stVerticalBlockBorderWrapper"] { padding-top: .15rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
+RENDER_QUALITIES = [120, 150, 200, 250]
+
 DEFAULTS = {
     "audio_cache": {},
     "pdf_bytes": None,
     "pdf_id": None,
+    "pdf_name": "",
     "pdf_page_num": 1,
     "pdf_zoom_dpi": 150,
     "crop_boxes": {},
@@ -58,10 +78,11 @@ for state_name, default in DEFAULTS.items():
         st.session_state[state_name] = default.copy() if isinstance(default, dict) else default
 
 
-def reset_document(pdf_bytes: bytes) -> None:
+def reset_document(pdf_bytes: bytes, name: str = "") -> None:
     """Reset all document-dependent state after an upload."""
     st.session_state.pdf_bytes = pdf_bytes
     st.session_state.pdf_id = hashlib.sha256(pdf_bytes).hexdigest()[:16]
+    st.session_state.pdf_name = name
     st.session_state.pdf_page_num = 1
     st.session_state.pdf_zoom_dpi = 150
     st.session_state.crop_boxes = {}
@@ -76,6 +97,38 @@ def cache_key(text: str, voice: str, speed: float) -> str:
     return f"audio-v2:{digest}:{voice}:{speed:.2f}"
 
 
+def render_empty_state() -> None:
+    """Landing screen shown until a document is uploaded."""
+    st.header("Read a scientific paper aloud")
+    st.markdown(
+        "Listen to a paper without the citation noise. "
+        "Draw a rectangle over the paragraphs you want, and only those are extracted, "
+        "cleaned and spoken."
+    )
+    st.write("")
+
+    first, second, third = st.columns(3, gap="medium")
+    steps = (
+        (first, "1 · Upload", "Load a PDF with a text layer from the sidebar. Scanned pages need OCR first."),
+        (second, "2 · Select", "Drag a rectangle on the page. Two-column paragraphs are read left column first."),
+        (third, "3 · Listen", "Check the transcript, edit it if needed, then generate an MP3 you can download."),
+    )
+    for column, heading, body in steps:
+        with column, st.container(border=True):
+            st.markdown(f"**{heading}**")
+            st.caption(body)
+
+    st.write("")
+    with st.container(border=True):
+        st.markdown("**Where your document goes**")
+        st.caption(
+            "PDF parsing and page rendering run locally in this Streamlit process. "
+            "Speech is produced by the online Microsoft Edge TTS service, so the cleaned "
+            "text of your selection leaves the machine when you press generate. "
+            "Avoid confidential, identifiable clinical or unpublished content."
+        )
+
+
 def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> None:
     """Render generation controls and a cached audio player."""
     words = len(text.split())
@@ -88,33 +141,43 @@ def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> 
     key = cache_key(text, voice, speed) if text else "empty"
 
     if st.button(
-        "🔊 Generate and play audio",
+        "Generate and play audio",
+        icon=":material/graphic_eq:",
         key=f"{key_prefix}_generate",
         use_container_width=True,
         type="primary",
         disabled=not bool(text.strip()),
     ):
-        with st.spinner("Generating speech in bounded chunks…"):
-            try:
-                st.session_state.audio_cache[key] = generate_speech(
-                    text,
-                    voice=voice,
-                    rate=speed,
-                    timeout_seconds=35,
-                    max_chars=DEFAULT_CHUNK_CHARS,
-                )
-            except Exception as exc:
-                st.error(str(exc))
+        # Long selections take minutes, so report per-segment advancement
+        # instead of an indeterminate spinner.
+        progress_slot = st.empty()
+        bar = progress_slot.progress(0.0, text="Contacting the speech service…")
+        try:
+            st.session_state.audio_cache[key] = generate_speech(
+                text,
+                voice=voice,
+                rate=speed,
+                timeout_seconds=35,
+                max_chars=DEFAULT_CHUNK_CHARS,
+                progress=lambda done, total: bar.progress(
+                    done / total, text=f"Segment {done} of {total} generated"
+                ),
+            )
+        except Exception as exc:
+            st.error(str(exc))
+        finally:
+            progress_slot.empty()
 
     if key in st.session_state.audio_cache:
         audio = st.session_state.audio_cache[key]
         duration = estimate_mp3_duration(audio)
         if duration is not None:
             minutes, seconds = divmod(round(duration), 60)
-            st.success(f"Complete MP3 ready · {minutes}:{seconds:02d}")
+            st.caption(f"Complete MP3 ready · {minutes}:{seconds:02d}")
         st.audio(audio, format="audio/mp3")
         st.download_button(
-            "Download complete MP3",
+            "Download MP3",
+            icon=":material/download:",
             data=audio,
             file_name="paper-selection.mp3",
             mime="audio/mpeg",
@@ -125,10 +188,15 @@ def render_audio_panel(text: str, voice: str, speed: float, key_prefix: str) -> 
 
 def render_page_controls(total_pages: int) -> None:
     """Render page navigation and raster quality controls."""
-    previous, following, jump, status = st.columns([1, 1, 1.5, 1.7], gap="small")
+    previous, following, jump, status = st.columns(
+        [1.5, 1.2, 1.3, 3.4], gap="small", vertical_alignment="center"
+    )
+    # Labelled rather than icon-only: an icon with a tooltip leaves assistive
+    # technology with nothing to announce.
     with previous:
         if st.button(
-            "◀ Previous",
+            "Previous",
+            icon=":material/chevron_left:",
             use_container_width=True,
             disabled=st.session_state.pdf_page_num <= 1,
         ):
@@ -136,7 +204,8 @@ def render_page_controls(total_pages: int) -> None:
             st.rerun()
     with following:
         if st.button(
-            "Next ▶",
+            "Next",
+            icon=":material/chevron_right:",
             use_container_width=True,
             disabled=st.session_state.pdf_page_num >= total_pages,
         ):
@@ -155,37 +224,29 @@ def render_page_controls(total_pages: int) -> None:
             st.session_state.pdf_page_num = int(requested_page)
             st.rerun()
     with status:
-        st.markdown(f"**Page {st.session_state.pdf_page_num} / {total_pages}**")
-
-    quality = st.radio(
-        "Render quality",
-        options=[120, 150, 200, 250],
-        index=[120, 150, 200, 250].index(st.session_state.pdf_zoom_dpi)
-        if st.session_state.pdf_zoom_dpi in [120, 150, 200, 250]
-        else 1,
-        format_func=lambda value: f"{value} dpi",
-        horizontal=True,
-    )
-    st.session_state.pdf_zoom_dpi = quality
+        st.caption(f"of {total_pages}")
 
 
-st.sidebar.title("📖 Paper Audio Reader")
+st.sidebar.title("Paper Audio Reader")
 st.sidebar.caption("Biomedical-safe PDF extraction and speech")
-uploaded_file = st.sidebar.file_uploader("Upload a research paper", type=["pdf"])
+uploaded_file = st.sidebar.file_uploader("Research paper (PDF)", type=["pdf"])
 if uploaded_file is not None:
     uploaded_bytes = uploaded_file.getvalue()
     uploaded_id = hashlib.sha256(uploaded_bytes).hexdigest()[:16]
     if uploaded_id != st.session_state.pdf_id:
-        reset_document(uploaded_bytes)
+        reset_document(uploaded_bytes, uploaded_file.name)
 
-if st.session_state.pdf_bytes is not None and st.sidebar.button("Close current PDF"):
+if st.session_state.pdf_bytes is not None and st.sidebar.button(
+    "Close current PDF", icon=":material/close:", use_container_width=True
+):
     st.session_state.pdf_bytes = None
     st.session_state.pdf_id = None
+    st.session_state.pdf_name = ""
     st.session_state.audio_cache.clear()
     st.rerun()
 
 st.sidebar.divider()
-st.sidebar.subheader("Text layout")
+
 layout_mode = st.sidebar.selectbox(
     "Reading order",
     options=["automatic", "single_column", "two_columns"],
@@ -197,35 +258,51 @@ layout_mode = st.sidebar.selectbox(
     help="For a two-column paragraph, the center of the rectangle is used as the column gutter.",
 )
 
-st.sidebar.subheader("Voice")
-voice_label = st.sidebar.selectbox("Voice", list(VOICES), label_visibility="collapsed")
+quality = st.sidebar.selectbox(
+    "Render quality",
+    options=RENDER_QUALITIES,
+    index=RENDER_QUALITIES.index(st.session_state.pdf_zoom_dpi)
+    if st.session_state.pdf_zoom_dpi in RENDER_QUALITIES
+    else 1,
+    format_func=lambda value: f"{value} dpi",
+    help="Resolution of the page image. Higher is sharper to select on, and slower to render.",
+)
+st.session_state.pdf_zoom_dpi = quality
+
+st.sidebar.divider()
+
+voice_label = st.sidebar.selectbox("Voice", list(VOICES))
 voice_name = VOICES[voice_label]
 speed_rate = st.sidebar.slider("Speed", 0.8, 2.0, 1.0, 0.1)
 
-st.sidebar.subheader("Cleaning")
-filter_brackets = st.sidebar.checkbox("Bracket citations [1-5]", value=True)
-filter_parentheses = st.sidebar.checkbox("Parenthetical citations (Smith 2020 / (1-3))", value=True)
-filter_superscript_citations = st.sidebar.checkbox(
-    "Superscript numeric citations ¹–⁵",
-    value=True,
-    help="Uses PDF font size and baseline position while preserving scientific exponents such as 10⁶, m² and Ca²⁺.",
+with st.sidebar.expander("Text cleaning", expanded=False):
+    st.caption("Everything below is removed from the spoken text.")
+    filter_brackets = st.checkbox("Bracket citations [1-5]", value=True)
+    filter_parentheses = st.checkbox("Parenthetical citations (Smith 2020)", value=True)
+    filter_superscript_citations = st.checkbox(
+        "Superscript numeric citations ¹–⁵",
+        value=True,
+        help="Uses PDF font size and baseline position while preserving scientific exponents such as 10⁶, m² and Ca²⁺.",
+    )
+    filter_urls = st.checkbox("URLs and DOIs", value=True)
+    filter_captions = st.checkbox("Figures, captions and tables", value=True)
+    filter_equations = st.checkbox("Standalone equations", value=True)
+
+active_filters = sum(
+    [
+        filter_brackets,
+        filter_parentheses,
+        filter_superscript_citations,
+        filter_urls,
+        filter_captions,
+        filter_equations,
+    ]
 )
-filter_urls = st.sidebar.checkbox("URLs and DOIs", value=True)
-filter_captions = st.sidebar.checkbox("Figures, captions and tables", value=True)
-filter_equations = st.sidebar.checkbox("Standalone equations", value=True)
+st.sidebar.caption(f"{active_filters} of 6 cleaning filters active")
 
 
 if st.session_state.pdf_bytes is None:
-    st.info("Upload a scientific PDF from the sidebar to begin.")
-    st.markdown(
-        """
-        The reader preserves biomedical notation, removes optional citation noise,
-        and reads only the text inside the rectangle you draw on a page.
-
-        PDF extraction and viewing are local. Speech uses the free online Edge TTS
-        service and therefore requires an Internet connection.
-        """
-    )
+    render_empty_state()
     st.stop()
 
 
@@ -249,12 +326,31 @@ if not text_sample:
     st.warning("No selectable text was found. This appears to be a scanned PDF; OCR is required first.")
 
 st.session_state.pdf_page_num = min(max(1, st.session_state.pdf_page_num), total_pdf_pages)
+
+st.caption(
+    f"{st.session_state.pdf_name or 'Document'} · "
+    f"{total_pdf_pages} page{'s' if total_pdf_pages > 1 else ''}"
+)
+
+active_page = st.session_state.pdf_page_num
+
+# The page layout is needed before the selector is drawn: the component
+# previews which paragraphs the rectangle captures, and selects one on a click.
+try:
+    page_data = extract_page_blocks_for_selection(st.session_state.pdf_bytes, active_page)
+    block_boxes = normalized_block_boxes(
+        page_data["blocks"], page_data["width"], page_data["height"]
+    )
+except Exception as exc:
+    page_data = None
+    block_boxes = []
+    st.error(f"Page analysis failed: {exc}")
+
 left_column, right_column = st.columns([1.18, 1.0], gap="large")
 
 with left_column:
-    st.subheader("🎯 Rectangle selection")
+    st.subheader("Page selection")
     render_page_controls(total_pdf_pages)
-    active_page = st.session_state.pdf_page_num
     try:
         rendered = render_page_with_red_underlines(
             st.session_state.pdf_bytes,
@@ -262,32 +358,35 @@ with left_column:
             bboxes=[],
             dpi=st.session_state.pdf_zoom_dpi,
         )
-        initial_selection = st.session_state.crop_boxes.get(active_page)
         selection = render_crosshair_canvas_selector(
             rendered,
-            width=760,
-            initial=initial_selection,
+            initial=st.session_state.crop_boxes.get(active_page),
+            blocks=block_boxes,
+            page_width=page_data["width"] if page_data else 612.0,
+            page_height=page_data["height"] if page_data else 792.0,
             key=(
                 f"selector_{st.session_state.pdf_id}_{active_page}_"
                 f"{st.session_state.selector_revision}"
             ),
         )
+        # The component owns clearing, so a missing value means "cleared here",
+        # not "not answered yet": the stored box has to follow.
         if selection:
             st.session_state.crop_boxes[active_page] = selection
-        if st.button("Clear selection", disabled=not bool(selection or initial_selection)):
+        else:
             st.session_state.crop_boxes.pop(active_page, None)
-            st.session_state.selector_revision += 1
-            st.rerun()
+        st.caption(
+            "Drag to draw · click a paragraph to take it whole · drag the handles to adjust · "
+            "ctrl + wheel to zoom · arrow keys to nudge · Escape to clear"
+        )
     except Exception as exc:
         selection = None
         st.error(f"Interactive page rendering failed: {exc}")
 
-effective_selection = selection or st.session_state.crop_boxes.get(st.session_state.pdf_page_num)
+effective_selection = selection
 try:
-    page_data = extract_page_blocks_for_selection(
-        st.session_state.pdf_bytes,
-        st.session_state.pdf_page_num,
-    )
+    if page_data is None:
+        raise RuntimeError("the page could not be analysed")
     selected_blocks = select_blocks_in_region(
         page_data["blocks"],
         page_data["width"],
@@ -317,18 +416,39 @@ except Exception as exc:
     st.error(f"Text selection failed: {exc}")
 
 with right_column:
-    st.subheader("🎧 Selected text")
+    st.subheader("Transcript")
     if not effective_selection:
-        st.info("Drag a rectangle over one or more paragraphs on the page.")
+        st.caption("Nothing selected yet.")
     elif not selected_blocks:
-        st.warning("The rectangle does not intersect selectable text.")
+        st.caption("The rectangle does not intersect selectable text.")
     else:
         layout_description = {
             "automatic": "automatic order",
             "single_column": "row-by-row order",
             "two_columns": "left column, then right column",
         }[layout_mode]
-        st.caption(f"{len(selected_blocks)} PDF text block(s) selected · {layout_description}")
-    render_audio_panel(clean_selection, voice_name, speed_rate, "rectangle")
-    st.divider()
-    st.text_area("Clean selected transcript", clean_selection, height=420, disabled=True)
+        paragraphs = len(selected_blocks)
+        st.caption(f"{paragraphs} paragraph{'s' if paragraphs > 1 else ''} · {layout_description}")
+
+    # The transcript is editable: fixing an odd extraction before synthesis is
+    # faster than redrawing the rectangle. The key is derived from the extracted
+    # text so a new selection replaces the box instead of keeping stale edits.
+    transcript_key = f"transcript_{hashlib.sha256(clean_selection.encode('utf-8')).hexdigest()[:16]}"
+    spoken_text = st.text_area(
+        "Text sent to the voice engine",
+        value=clean_selection,
+        height=360,
+        key=transcript_key,
+        label_visibility="collapsed",
+        placeholder="The cleaned text of your selection appears here, and can be edited before synthesis.",
+    )
+
+    with st.container(border=True):
+        render_audio_panel(spoken_text, voice_name, speed_rate, "rectangle")
+
+st.divider()
+st.caption(
+    "Paper Audio Reader · MIT · "
+    "[source](https://github.com/AriPrez/Paper-Audio-Reader) · "
+    "PDF parsing and rendering are local; speech is sent to the online Edge TTS service."
+)
