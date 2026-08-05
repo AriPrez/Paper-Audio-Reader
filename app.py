@@ -163,10 +163,19 @@ def render_audio_panel(
         type="primary",
         disabled=not bool(spoken.strip()),
     ):
-        # Long selections take minutes, so report per-segment advancement
-        # instead of an indeterminate spinner.
+        # The bar sits at zero until the first segment lands, so say what is
+        # actually happening rather than "contacting": every segment is already
+        # in flight, and the wait is the service's, not a connection being set
+        # up. Naming the count also makes a long selection self-explanatory.
+        total_segments = len(speech_chunks)
         progress_slot = st.empty()
-        bar = progress_slot.progress(0.0, text="Contacting the speech service…")
+        bar = progress_slot.progress(
+            0.0,
+            text=(
+                f"Generating {total_segments} segment{'s' if total_segments > 1 else ''}"
+                f"{' (4 at a time)' if total_segments > 1 else ''}…"
+            ),
+        )
         try:
             st.session_state.audio_cache[key] = generate_speech(
                 spoken,
