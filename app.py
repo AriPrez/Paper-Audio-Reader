@@ -56,6 +56,21 @@ st.markdown(
       .stTextArea textarea { line-height: 1.62; font-size: .95rem; }
       .stAudio { width: 100%; }
       div[data-testid="stVerticalBlockBorderWrapper"] { padding-top: .15rem; }
+      /* Entry screen. Colour comes from the theme via currentColor and opacity,
+         so there is nothing here to keep in sync with dark mode. */
+      .hero { text-align: center; padding: 3.2rem 0 1.6rem; }
+      .hero.compact { padding: 1.6rem 0 1rem; }
+      .hero svg { opacity: .5; }
+      .hero h1 {
+        font-size: 2.7rem; line-height: 1.15; letter-spacing: -0.025em;
+        margin: 1.3rem 0 .6rem;
+      }
+      .hero.compact h1 { font-size: 1.9rem; margin-top: 0; }
+      .hero p {
+        max-width: 40rem; margin: 0 auto; opacity: .68;
+        font-size: 1.06rem; line-height: 1.62;
+      }
+      .hero.compact p { font-size: .98rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -73,6 +88,7 @@ DEFAULTS = {
     "pdf_zoom_dpi": 150,
     "crop_boxes": {},
     "selector_revision": 0,
+    "started": False,
 }
 for state_name, default in DEFAULTS.items():
     if state_name not in st.session_state:
@@ -98,36 +114,106 @@ def cache_key(text: str, voice: str, speed: float) -> str:
     return f"audio-v2:{digest}:{voice}:{speed:.2f}"
 
 
-def render_empty_state() -> None:
-    """Landing screen shown until a document is uploaded."""
-    st.header("Read a scientific paper aloud")
-    st.markdown(
-        "Listen to a paper without the citation noise. "
-        "Draw a rectangle over the paragraphs you want, and only those are extracted, "
-        "cleaned and spoken."
-    )
-    st.write("")
+# The mark inherits the surrounding text colour, so it follows the theme in
+# both modes without a second copy: a page, and the sound coming off it.
+HERO_MARK = """
+<svg viewBox="0 0 64 48" width="88" height="66" fill="none"
+     stroke="currentColor" stroke-width="1.6"
+     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M8 4h20l8 8v32H8z" />
+  <path d="M28 4v8h8" />
+  <path d="M14 20h14M14 26h14M14 32h9" />
+  <path d="M44 18a10 10 0 0 1 0 12" />
+  <path d="M50 13a17 17 0 0 1 0 22" />
+  <path d="M56 8a24 24 0 0 1 0 32" />
+</svg>
+"""
 
-    first, second, third = st.columns(3, gap="medium")
-    steps = (
-        (first, "1 · Upload", "Load a PDF with a text layer from the sidebar. Scanned pages need OCR first."),
-        (second, "2 · Select", "Drag a rectangle on the page. Two-column paragraphs are read left column first."),
-        (third, "3 · Listen", "Check the transcript, edit it if needed, then generate an MP3 you can download."),
+STEPS = (
+    ("1 · Upload", "Load a PDF with a text layer. Scanned pages need OCR first."),
+    ("2 · Select", "Drag a rectangle on the page, or click a paragraph to take it whole."),
+    ("3 · Listen", "Check the transcript, edit it if needed, then generate an MP3."),
+)
+
+PRIVACY_NOTE = (
+    "PDF parsing and page rendering run locally in this Streamlit process. "
+    "Speech is produced by the online Microsoft Edge TTS service, so the cleaned "
+    "text of your selection leaves the machine when you press generate. "
+    "Avoid confidential, identifiable clinical or unpublished content."
+)
+
+
+def accept_upload(container) -> None:
+    """Render the single file uploader and load whatever it returns."""
+    uploaded = container.file_uploader(
+        "Research paper (PDF)",
+        type=["pdf"],
+        key="pdf_uploader",
+        label_visibility="collapsed" if container is not st.sidebar else "visible",
     )
-    for column, heading, body in steps:
+    if uploaded is None:
+        return
+    uploaded_bytes = uploaded.getvalue()
+    uploaded_id = hashlib.sha256(uploaded_bytes).hexdigest()[:16]
+    if uploaded_id != st.session_state.pdf_id:
+        reset_document(uploaded_bytes, uploaded.name)
+        st.rerun()
+
+
+def render_steps_and_privacy() -> None:
+    for column, (heading, body) in zip(st.columns(3, gap="medium"), STEPS):
         with column, st.container(border=True):
             st.markdown(f"**{heading}**")
             st.caption(body)
-
     st.write("")
     with st.container(border=True):
         st.markdown("**Where your document goes**")
-        st.caption(
-            "PDF parsing and page rendering run locally in this Streamlit process. "
-            "Speech is produced by the online Microsoft Edge TTS service, so the cleaned "
-            "text of your selection leaves the machine when you press generate. "
-            "Avoid confidential, identifiable clinical or unpublished content."
-        )
+        st.caption(PRIVACY_NOTE)
+
+
+def render_landing() -> None:
+    """Entry screen: one thing to read, one thing to press."""
+    # Flush left on purpose: Markdown turns any line indented by four spaces
+    # into a code block, which renders the tags as literal text.
+    st.markdown(
+        f"""<div class="hero">
+{HERO_MARK}
+<h1>Read a scientific paper aloud</h1>
+<p>Listen to a paper without the citation noise. Draw a rectangle over the
+paragraphs you want, and only those are extracted, cleaned and spoken —
+with the biomedical notation pronounced properly.</p>
+</div>""",
+        unsafe_allow_html=True,
+    )
+    _, middle, _ = st.columns([1, 1.1, 1])
+    with middle:
+        if st.button(
+            "Start reading",
+            icon=":material/arrow_forward:",
+            type="primary",
+            use_container_width=True,
+        ):
+            st.session_state.started = True
+            st.rerun()
+    st.write("")
+    st.write("")
+    render_steps_and_privacy()
+
+
+def render_upload_screen() -> None:
+    """Shown once past the landing, while no document is open."""
+    st.markdown(
+        '<div class="hero compact">'
+        "<h1>Choose a paper</h1>"
+        "<p>A PDF with a text layer. It stays on this machine.</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    _, middle, _ = st.columns([1, 2, 1])
+    with middle:
+        accept_upload(middle)
+    st.write("")
+    render_steps_and_privacy()
 
 
 def render_audio_panel(
@@ -253,12 +339,12 @@ def render_page_controls(total_pages: int) -> None:
 
 st.sidebar.title("Paper Audio Reader")
 st.sidebar.caption("Biomedical-safe PDF extraction and speech")
-uploaded_file = st.sidebar.file_uploader("Research paper (PDF)", type=["pdf"])
-if uploaded_file is not None:
-    uploaded_bytes = uploaded_file.getvalue()
-    uploaded_id = hashlib.sha256(uploaded_bytes).hexdigest()[:16]
-    if uploaded_id != st.session_state.pdf_id:
-        reset_document(uploaded_bytes, uploaded_file.name)
+
+# One uploader, moved rather than duplicated: it is the whole point of the
+# screen while no document is open, and a sidebar detail once one is.
+document_open = st.session_state.pdf_bytes is not None
+if document_open:
+    accept_upload(st.sidebar)
 
 if st.session_state.pdf_bytes is not None and st.sidebar.button(
     "Close current PDF", icon=":material/close:", use_container_width=True
@@ -337,8 +423,12 @@ active_filters = sum(
 st.sidebar.caption(f"{active_filters} of 6 cleaning filters active")
 
 
+if not st.session_state.started:
+    render_landing()
+    st.stop()
+
 if st.session_state.pdf_bytes is None:
-    render_empty_state()
+    render_upload_screen()
     st.stop()
 
 
