@@ -29,10 +29,14 @@ from parser import (  # noqa: E402
 )
 from tts_engine import (  # noqa: E402
     DEFAULT_CHUNK_CHARS,
+    DEFAULT_CONCURRENCY,
     VOICES,
     chunk_text,
     estimate_mp3_duration,
     generate_speech_async,
+    join_mp3_parts,
+    plan_parts,
+    render_chunks_async,
 )
 
 
@@ -727,3 +731,67 @@ def test_real_immunology_paper_has_no_statistical_section_titles() -> None:
     assert any("Results" in title for title in titles)
     assert any("Discussion" in title for title in titles)
     assert any("Method Details" in title for title in titles)
+
+
+def test_parts_partition_every_chunk_exactly_once() -> None:
+    """Progressive playback must not drop or repeat a segment."""
+    for count in (1, 3, 4, 5, 12, 13, 40, 97):
+        parts = plan_parts(count)
+        covered = [index for start, stop in parts for index in range(start, stop)]
+        assert covered == list(range(count)), f"{count} chunks were not partitioned"
+
+
+def test_plan_parts_starts_small_so_playback_can_begin_sooner() -> None:
+    """The opening part is the only one anybody waits for."""
+    parts = plan_parts(40, part_size=12, first_part=4)
+    assert parts[0] == (0, 4)
+    assert all(stop - start == 12 for start, stop in parts[1:-1])
+    assert plan_parts(0) == []
+    assert plan_parts(2, part_size=12, first_part=4) == [(0, 2)]
+    # A first part larger than a full one would defeat the point.
+    assert plan_parts(30, part_size=4, first_part=99)[0] == (0, 4)
+
+
+def test_progressive_parts_reassemble_into_the_identical_recording(monkeypatch) -> None:
+    """Generating part by part must produce the same bytes as one pass.
+
+    Each part is a standalone MP3 so the browser can play it on its own, which
+    means every part after the first carries an ID3 tag that has to come back
+    out when they are joined. This is the regression that would silently
+    corrupt the downloaded file.
+    """
+    import tts_engine
+
+    text = " ".join(
+        f"Sentence number {index} about tumour infiltrating lymphocytes." for index in range(60)
+    )
+    chunks = chunk_text(text, max_chars=200)
+    assert len(chunks) > DEFAULT_CONCURRENCY, "the fixture must span several parts"
+    index_of = {chunk: index for index, chunk in enumerate(chunks)}
+
+    def payload(index: int) -> bytes:
+        # A real ID3v2 header with an empty tag, then a frame.
+        return b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xf3\x64\xc4" + bytes([index]) * 300
+
+    async def fake_chunk(chunk: str, voice: str, rate: str, timeout_seconds: float) -> bytes:
+        return payload(index_of[chunk])
+
+    monkeypatch.setattr(tts_engine, "edge_tts", object())
+    monkeypatch.setattr(tts_engine, "_generate_chunk", fake_chunk)
+
+    whole = asyncio.run(generate_speech_async(text, max_chars=200))
+
+    parts = [
+        asyncio.run(render_chunks_async(chunks[start:stop]))
+        for start, stop in plan_parts(len(chunks))
+    ]
+    assert len(parts) > 1, "the fixture must produce more than one part"
+    assert all(part.startswith(b"ID3") for part in parts), "each part must play on its own"
+    assert join_mp3_parts(parts) == whole
+
+
+def test_joining_parts_keeps_only_the_leading_tag() -> None:
+    tag = b"ID3\x04\x00\x00\x00\x00\x00\x00"
+    assert join_mp3_parts([tag + b"a", tag + b"b", tag + b"c"]) == tag + b"abc"
+    assert join_mp3_parts([]) == b""
+    assert join_mp3_parts([b"", tag + b"a"]) == tag + b"a"

@@ -28,6 +28,10 @@ vocabulaire biomédical tout en retirant le bruit gênant pour la synthèse voca
   réassemblés dans l'ordre, avec timeout, reprise d'un segment bloqué,
   avancement, durée MP3 vérifiable, téléchargement et cache par contenu.
   Une section de 15 minutes d'audio se génère en une dizaine de secondes.
+- **Écoute progressive** : l'audio arrive par parties et la lecture peut
+  commencer sur la première pendant que les suivantes se fabriquent. Le passage
+  d'une partie à l'autre est automatique ; la barre de recherche couvre
+  l'ensemble déjà produit.
 - Thème clair et sombre défini dans [`.streamlit/config.toml`](.streamlit/config.toml),
   suivi également par le composant de sélection.
 

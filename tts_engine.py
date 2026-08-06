@@ -66,6 +66,35 @@ CHUNK_ATTEMPTS = 2
 # punishes. _generate_chunk_with_retry remains the net if that ever changes.
 DEFAULT_CONCURRENCY = 12
 
+# Progressive playback generates one part per Streamlit rerun, so a part is one
+# concurrent wave. The opening part is smaller because it is the only one
+# anybody waits for, but the gain is modest and worth stating honestly: a wave
+# is bounded by its slowest request, so asking for fewer does not divide the
+# wait. Measured interleaved in both orders, median time before playback can
+# start: 2.7s for one chunk, 5.7s for four, 6.7s for twelve. Four keeps most of
+# the gain without making the first part uselessly short.
+FIRST_PART_CHUNKS = 4
+
+
+def plan_parts(
+    chunk_count: int,
+    part_size: int = DEFAULT_CONCURRENCY,
+    first_part: int = FIRST_PART_CHUNKS,
+) -> list[tuple[int, int]]:
+    """Group chunk indices into ``(start, stop)`` parts, smallest one first."""
+    if chunk_count <= 0:
+        return []
+    part_size = max(1, int(part_size))
+    first_part = max(1, min(int(first_part), part_size))
+    parts: list[tuple[int, int]] = []
+    start = 0
+    while start < chunk_count:
+        size = first_part if not parts else part_size
+        stop = min(chunk_count, start + size)
+        parts.append((start, stop))
+        start = stop
+    return parts
+
 
 def chunk_text(text: str, max_chars: int = DEFAULT_CHUNK_CHARS) -> list[str]:
     """Split long text on sentence/word boundaries for reliable synthesis."""
@@ -207,16 +236,29 @@ async def _generate_chunk_with_retry(
     raise last_error  # type: ignore[misc]
 
 
-async def generate_speech_async(
-    text: str,
+def join_mp3_parts(parts: list[bytes]) -> bytes:
+    """Concatenate standalone MP3 parts into one playable file.
+
+    Empty parts are dropped before the tag is considered, not after: otherwise
+    a leading empty part would push the first real one off index 0 and strip
+    the only ID3 header the file was going to have.
+    """
+    present = [part for part in parts if part]
+    return b"".join(
+        part if index == 0 else _strip_leading_id3(part)
+        for index, part in enumerate(present)
+    )
+
+
+async def render_chunks_async(
+    chunks: list[str],
     voice: str = "en-US-ChristopherNeural",
     rate: str = "+0%",
     timeout_seconds: float = 35.0,
-    max_chars: int = DEFAULT_CHUNK_CHARS,
     progress: Callable[[int, int], None] | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
 ) -> bytes:
-    """Generate MP3 bytes in bounded chunks, several requests at a time.
+    """Synthesise an explicit list of chunks into one standalone MP3.
 
     Chunks are reassembled in their original order, so the audio is identical
     to what sequential generation produced — only the waiting changes.
@@ -227,7 +269,6 @@ async def generate_speech_async(
     """
     if edge_tts is None:
         raise ImportError("Installe edge-tts avec `pip install edge-tts`.")
-    chunks = chunk_text(text, max_chars=max_chars)
     if not chunks:
         raise ValueError("Aucun texte à lire.")
 
@@ -254,11 +295,46 @@ async def generate_speech_async(
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
 
-    audio_parts = [
-        audio if index == 0 else _strip_leading_id3(audio)
-        for index, audio in sorted(rendered)
-    ]
-    return b"".join(audio_parts)
+    return join_mp3_parts([audio for _, audio in sorted(rendered)])
+
+
+async def generate_speech_async(
+    text: str,
+    voice: str = "en-US-ChristopherNeural",
+    rate: str = "+0%",
+    timeout_seconds: float = 35.0,
+    max_chars: int = DEFAULT_CHUNK_CHARS,
+    progress: Callable[[int, int], None] | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
+) -> bytes:
+    """Generate MP3 bytes for ``text`` in bounded chunks, several at a time."""
+    return await render_chunks_async(
+        chunk_text(text, max_chars=max_chars),
+        voice=voice,
+        rate=rate,
+        timeout_seconds=timeout_seconds,
+        progress=progress,
+        concurrency=concurrency,
+    )
+
+
+def rate_string(rate: float) -> str:
+    """Convert a speed multiplier into the percentage Edge expects."""
+    return f"{round((float(rate) - 1.0) * 100):+d}%"
+
+
+def _run(coroutine) -> bytes:
+    """Run a coroutine from Streamlit's script thread."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+
+    # This branch is uncommon in Streamlit but useful in notebooks.
+    import nest_asyncio
+
+    nest_asyncio.apply(loop)
+    return loop.run_until_complete(coroutine)
 
 
 def generate_speech(
@@ -271,25 +347,35 @@ def generate_speech(
     concurrency: int = DEFAULT_CONCURRENCY,
 ) -> bytes:
     """Synchronous wrapper suitable for Streamlit's script thread."""
-    percentage = round((float(rate) - 1.0) * 100)
-    rate_string = f"{percentage:+d}%"
-    coroutine = generate_speech_async(
-        text,
-        voice=voice,
-        rate=rate_string,
-        timeout_seconds=timeout_seconds,
-        max_chars=max_chars,
-        progress=progress,
-        concurrency=concurrency,
+    return _run(
+        generate_speech_async(
+            text,
+            voice=voice,
+            rate=rate_string(rate),
+            timeout_seconds=timeout_seconds,
+            max_chars=max_chars,
+            progress=progress,
+            concurrency=concurrency,
+        )
     )
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coroutine)
 
-    # This branch is uncommon in Streamlit but useful in notebooks.
-    import nest_asyncio
-
-    nest_asyncio.apply(loop)
-    return loop.run_until_complete(coroutine)
+def render_part(
+    chunks: list[str],
+    voice: str = "en-US-ChristopherNeural",
+    rate: float = 1.0,
+    timeout_seconds: float = 35.0,
+    progress: Callable[[int, int], None] | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
+) -> bytes:
+    """Synthesise one part of a progressive job into a standalone MP3."""
+    return _run(
+        render_chunks_async(
+            chunks,
+            voice=voice,
+            rate=rate_string(rate),
+            timeout_seconds=timeout_seconds,
+            progress=progress,
+            concurrency=concurrency,
+        )
+    )

@@ -24,13 +24,15 @@ from parser import (
     render_page_with_red_underlines,
     select_blocks_in_region,
 )
+from audio_queue import render_audio_queue
 from tts_engine import (
     DEFAULT_CHUNK_CHARS,
-    DEFAULT_CONCURRENCY,
     VOICES,
     chunk_text,
     estimate_mp3_duration,
-    generate_speech,
+    join_mp3_parts,
+    plan_parts,
+    render_part,
 )
 
 
@@ -81,6 +83,7 @@ DEFAULTS = {
     "crop_boxes": {},
     "selector_revision": 0,
     "started": False,
+    "audio_stream": None,
 }
 for state_name, default in DEFAULTS.items():
     if state_name not in st.session_state:
@@ -353,34 +356,77 @@ def render_audio_panel(
         type="primary",
         disabled=not bool(spoken.strip()),
     ):
-        # The bar sits at zero until the first segment lands, so say what is
-        # actually happening rather than "contacting": every segment is already
-        # in flight, and the wait is the service's, not a connection being set
-        # up. Naming the count also makes a long selection self-explanatory.
-        total_segments = len(speech_chunks)
-        progress_slot = st.empty()
-        bar = progress_slot.progress(
-            0.0,
-            text=(
-                f"Generating {total_segments} segment{'s' if total_segments > 1 else ''}"
-                f"{f' ({DEFAULT_CONCURRENCY} at a time)' if total_segments > DEFAULT_CONCURRENCY else ''}…"
-            ),
+        st.session_state.audio_stream = {
+            "job": key,
+            "chunks": speech_chunks,
+            "plan": plan_parts(len(speech_chunks)),
+            "parts": {},
+            "sent": [],
+            "voice": voice,
+            "speed": speed,
+            "error": None,
+        }
+        st.rerun()
+
+    stream = st.session_state.audio_stream
+    streaming = isinstance(stream, dict) and stream.get("job") == key
+    if streaming:
+        plan = stream["plan"]
+        finished = len(stream["parts"])
+        complete = finished >= len(plan)
+
+        # The player is rendered before the next part is requested, not after:
+        # Streamlit sends each element to the browser as the script produces
+        # it, so what is already made starts playing while the rest is still
+        # being generated. That ordering is the whole feature.
+        pending = [
+            (index, stream["parts"][index])
+            for index in sorted(stream["parts"])
+            if index not in stream["sent"]
+        ]
+        render_audio_queue(
+            job=stream["job"],
+            new_parts=pending,
+            total_parts=len(plan),
+            done=complete,
+            key=f"{key_prefix}_queue",
         )
-        try:
-            st.session_state.audio_cache[key] = generate_speech(
-                spoken,
-                voice=voice,
-                rate=speed,
-                timeout_seconds=45,
-                max_chars=DEFAULT_CHUNK_CHARS,
-                progress=lambda done, total: bar.progress(
-                    done / total, text=f"Segment {done} of {total} generated"
-                ),
+        stream["sent"].extend(index for index, _ in pending)
+
+        if stream["error"]:
+            st.error(stream["error"])
+        elif not complete:
+            start, stop = plan[finished]
+            progress_slot = st.empty()
+            bar = progress_slot.progress(
+                finished / len(plan),
+                text=f"Generating part {finished + 1} of {len(plan)}…",
             )
-        except Exception as exc:
-            st.error(str(exc))
-        finally:
-            progress_slot.empty()
+            try:
+                stream["parts"][finished] = render_part(
+                    stream["chunks"][start:stop],
+                    voice=stream["voice"],
+                    rate=stream["speed"],
+                    timeout_seconds=45,
+                    progress=lambda made, total: bar.progress(
+                        (finished + made / total) / len(plan),
+                        text=(
+                            f"Part {finished + 1} of {len(plan)} — "
+                            f"segment {made} of {total}"
+                        ),
+                    ),
+                )
+            except Exception as exc:
+                # Recorded rather than raised: reruns drive this loop, and an
+                # exception here would leave it retrying the same failed part.
+                stream["error"] = str(exc)
+            finally:
+                progress_slot.empty()
+            st.rerun()
+        elif key not in st.session_state.audio_cache:
+            st.session_state.audio_cache[key] = join_mp3_parts(
+                [stream["parts"][index] for index in sorted(stream["parts"])]
+            )
 
     if key in st.session_state.audio_cache:
         audio = st.session_state.audio_cache[key]
@@ -388,7 +434,10 @@ def render_audio_panel(
         if duration is not None:
             minutes, seconds = divmod(round(duration), 60)
             st.caption(f"Complete MP3 ready · {minutes}:{seconds:02d}")
-        st.audio(audio, format="audio/mp3")
+        # Only one player at a time: the queue player above may be mid-playback,
+        # and a second element would talk over it.
+        if not streaming:
+            st.audio(audio, format="audio/mp3")
         st.download_button(
             "Download MP3",
             icon=":material/download:",

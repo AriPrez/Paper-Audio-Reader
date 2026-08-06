@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      /* Overridden at render time from the Streamlit theme; these are fallbacks. */
+      :root {
+        --accent: #0f7c91;
+        --border: #dce3e6;
+        --surface: #f3f6f7;
+        --text: #16272d;
+        --font: system-ui, -apple-system, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; overflow: hidden; background: transparent; }
+      body { font-family: var(--font); color: var(--text); }
+
+      #frame {
+        display: flex; align-items: center; gap: 12px;
+        border: 1px solid var(--border); border-radius: 6px;
+        padding: 10px 12px; background: var(--surface);
+      }
+
+      #play {
+        appearance: none; flex: 0 0 auto;
+        width: 38px; height: 38px; border-radius: 50%;
+        border: 1px solid var(--accent); background: var(--accent);
+        color: var(--surface); cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+      }
+      #play:disabled { opacity: .45; cursor: default; }
+      #play:focus-visible, #seek:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      #play svg { width: 15px; height: 15px; fill: currentColor; }
+
+      #body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+
+      #seek {
+        appearance: none; width: 100%; height: 4px; padding: 0;
+        border-radius: 2px; cursor: pointer; background: var(--border);
+      }
+      #seek::-webkit-slider-thumb {
+        appearance: none; width: 11px; height: 11px; border-radius: 50%;
+        background: var(--accent); border: none; margin-top: -3.5px;
+      }
+      #seek::-moz-range-thumb {
+        width: 11px; height: 11px; border-radius: 50%;
+        background: var(--accent); border: none;
+      }
+      #seek:disabled { opacity: .5; cursor: default; }
+
+      #status {
+        display: flex; justify-content: space-between; gap: 10px;
+        font-size: 12px; opacity: .72; font-variant-numeric: tabular-nums;
+      }
+      #note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #note.pending::after {
+        content: ""; display: inline-block;
+        width: 6px; height: 6px; margin-left: 6px; border-radius: 50%;
+        background: var(--accent); animation: pulse 1.1s ease-in-out infinite;
+      }
+      @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+    </style>
+  </head>
+  <body>
+    <div id="frame">
+      <button id="play" type="button" disabled aria-label="Play">
+        <svg id="playIcon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>
+      </button>
+      <div id="body">
+        <input id="seek" type="range" min="0" max="1000" value="0" step="1" disabled
+               aria-label="Seek within the audio" />
+        <div id="status">
+          <span id="time">0:00</span>
+          <span id="note">Waiting for the first part…</span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const frame = document.getElementById("frame");
+      const playButton = document.getElementById("play");
+      const playIcon = document.getElementById("playIcon");
+      const seek = document.getElementById("seek");
+      const timeLabel = document.getElementById("time");
+      const note = document.getElementById("note");
+
+      const PLAY = "M4 2.5v11l9-5.5z";
+      const PAUSE = "M4 2.5h3.2v11H4zM8.8 2.5H12v11H8.8z";
+
+      // Parts arrive one per Streamlit rerun and are kept here for the life of
+      // the iframe. Streamlit re-sends the same args whenever anything else on
+      // the page reruns, so every part carries an index and is added once.
+      const parts = [];          // {index, url, duration}
+      const seen = new Set();
+      let expected = null;       // total parts, once Python knows
+      let complete = false;
+      let current = 0;           // index of the part loaded in the element
+      let advancing = false;     // suppresses the pause icon between parts
+
+      const audio = new Audio();
+      audio.preload = "auto";
+
+      function post(type, payload = {}) {
+        window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, "*");
+      }
+
+      function resizeFrame() {
+        requestAnimationFrame(() =>
+          post("streamlit:setFrameHeight", { height: frame.scrollHeight + 4 })
+        );
+      }
+
+      function clock(seconds) {
+        if (!isFinite(seconds) || seconds < 0) seconds = 0;
+        const total = Math.floor(seconds);
+        const minutes = Math.floor(total / 60);
+        return `${minutes}:${String(total % 60).padStart(2, "0")}`;
+      }
+
+      /* ---- timeline ----------------------------------------------------
+         Parts are separate MP3 files, so the element only ever knows about
+         one of them. Every position shown to the listener is offset by the
+         parts already played, which is what makes several files read as one
+         recording. Durations of parts that have not loaded yet are unknown,
+         so the total is marked provisional until generation finishes. */
+
+      function offsetOf(index) {
+        let total = 0;
+        for (let i = 0; i < index && i < parts.length; i += 1) total += parts[i].duration || 0;
+        return total;
+      }
+
+      function knownDuration() {
+        return parts.reduce((total, part) => total + (part.duration || 0), 0);
+      }
+
+      function elapsed() {
+        return offsetOf(current) + (audio.currentTime || 0);
+      }
+
+      function render() {
+        const known = knownDuration();
+        const at = elapsed();
+        playButton.disabled = parts.length === 0;
+        seek.disabled = parts.length === 0;
+        seek.value = known > 0 ? Math.round((at / known) * 1000) : 0;
+        timeLabel.textContent = `${clock(at)} / ${clock(known)}${complete ? "" : "…"}`;
+
+        if (!complete) {
+          const made = expected
+            ? `${parts.length} of ${expected} parts ready`
+            : `${parts.length} part(s) ready`;
+          note.textContent = `Generating the rest — ${made}`;
+          note.classList.add("pending");
+        } else {
+          note.classList.remove("pending");
+          note.textContent = parts.length > 1 ? `${parts.length} parts` : "";
+        }
+        playIcon.setAttribute("d", audio.paused ? PLAY : PAUSE);
+        playButton.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
+        resizeFrame();
+      }
+
+      function load(index, autoplay) {
+        if (index < 0 || index >= parts.length) return;
+        current = index;
+        audio.src = parts[index].url;
+        if (autoplay) {
+          // Same element throughout, so the user activation from the first
+          // click carries over and autoplay is not blocked between parts.
+          audio.play().catch(() => render());
+        }
+      }
+
+      audio.addEventListener("loadedmetadata", () => {
+        const part = parts[current];
+        if (part && isFinite(audio.duration)) part.duration = audio.duration;
+        render();
+      });
+      audio.addEventListener("timeupdate", render);
+      audio.addEventListener("play", render);
+      audio.addEventListener("pause", () => { if (!advancing) render(); });
+
+      audio.addEventListener("ended", () => {
+        if (current + 1 < parts.length) {
+          advancing = true;
+          load(current + 1, true);
+          advancing = false;
+          return;
+        }
+        if (!complete) {
+          // Caught up with generation: the next part starts by itself when it
+          // arrives, so the listener is not asked to press play again.
+          note.textContent = "Waiting for the next part…";
+          note.classList.add("pending");
+        }
+        render();
+      });
+
+      playButton.addEventListener("click", () => {
+        if (!parts.length) return;
+        if (audio.paused) {
+          if (!audio.src) load(0, true);
+          else audio.play().catch(() => render());
+        } else {
+          audio.pause();
+        }
+      });
+
+      seek.addEventListener("input", () => {
+        const known = knownDuration();
+        if (!known) return;
+        const target = (Number(seek.value) / 1000) * known;
+        let index = 0;
+        let remaining = target;
+        while (index + 1 < parts.length && remaining > (parts[index].duration || 0)) {
+          remaining -= parts[index].duration || 0;
+          index += 1;
+        }
+        const wasPlaying = !audio.paused;
+        if (index !== current) {
+          advancing = true;
+          load(index, wasPlaying);
+          advancing = false;
+          audio.addEventListener("loadedmetadata", function once() {
+            audio.removeEventListener("loadedmetadata", once);
+            audio.currentTime = Math.max(0, remaining);
+          });
+        } else {
+          audio.currentTime = Math.max(0, remaining);
+        }
+        render();
+      });
+
+      /* ---- theme and render -------------------------------------------- */
+
+      function applyTheme(theme) {
+        if (!theme) return;
+        const root = document.documentElement.style;
+        if (theme.primaryColor) root.setProperty("--accent", theme.primaryColor);
+        if (theme.textColor) root.setProperty("--text", theme.textColor);
+        if (theme.secondaryBackgroundColor) root.setProperty("--surface", theme.secondaryBackgroundColor);
+        if (theme.borderColor) root.setProperty("--border", theme.borderColor);
+        else if (theme.secondaryBackgroundColor) root.setProperty("--border", theme.secondaryBackgroundColor);
+        if (theme.font) root.setProperty("--font", theme.font);
+      }
+
+      // A part's length is only known once something decodes its header, and
+      // the playing element decodes one part at a time. Without this the total
+      // reads 0:00 until the listener presses play, and every part behind the
+      // current one is missing from it.
+      function measure(part) {
+        const probe = new Audio();
+        probe.preload = "metadata";
+        probe.addEventListener("loadedmetadata", () => {
+          if (isFinite(probe.duration)) {
+            part.duration = probe.duration;
+            render();
+          }
+        });
+        probe.src = part.url;
+      }
+
+      function toUrl(base64) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+        return URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+      }
+
+      function reset() {
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        parts.splice(0, parts.length).forEach((part) => URL.revokeObjectURL(part.url));
+        seen.clear();
+        current = 0;
+        complete = false;
+        expected = null;
+      }
+
+      window.addEventListener("message", (event) => {
+        if (event.data.type !== "streamlit:render") return;
+        const args = event.data.args || {};
+        applyTheme(event.data.theme);
+
+        // A new job reuses the same iframe; without this its parts would be
+        // appended to the previous recording.
+        if (args.job && args.job !== reset.job) {
+          reset();
+          reset.job = args.job;
+        }
+
+        const incoming = Array.isArray(args.parts) ? args.parts : [];
+        let added = false;
+        for (const part of incoming) {
+          const index = Number(part.index);
+          if (!part.data || seen.has(index)) continue;
+          seen.add(index);
+          parts[index] = { index, url: toUrl(part.data), duration: 0 };
+          measure(parts[index]);
+          added = true;
+        }
+        if (added && !audio.src && parts.length) load(0, false);
+        expected = Number(args.total_parts) || null;
+        complete = Boolean(args.done);
+
+        if (added && audio.paused && audio.ended && current + 1 < parts.length) {
+          load(current + 1, true);   // resume a listener who caught up
+        }
+        render();
+      });
+
+      post("streamlit:componentReady", { apiVersion: 1 });
+      resizeFrame();
+      render();
+    </script>
+  </body>
+</html>
