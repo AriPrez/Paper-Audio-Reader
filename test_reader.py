@@ -743,6 +743,9 @@ def test_parts_partition_every_chunk_exactly_once() -> None:
 
 def test_plan_parts_starts_small_so_playback_can_begin_sooner() -> None:
     """The opening part is the only one anybody waits for."""
+    # By default it is a single chunk: time to first sound is one request, and
+    # asking for more means waiting for the slowest of them.
+    assert plan_parts(40)[0] == (0, 1)
     parts = plan_parts(40, part_size=12, first_part=4)
     assert parts[0] == (0, 4)
     assert all(stop - start == 12 for start, stop in parts[1:-1])

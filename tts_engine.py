@@ -67,13 +67,18 @@ CHUNK_ATTEMPTS = 2
 DEFAULT_CONCURRENCY = 12
 
 # Progressive playback generates one part per Streamlit rerun, so a part is one
-# concurrent wave. The opening part is smaller because it is the only one
-# anybody waits for, but the gain is modest and worth stating honestly: a wave
-# is bounded by its slowest request, so asking for fewer does not divide the
-# wait. Measured interleaved in both orders, median time before playback can
-# start: 2.7s for one chunk, 5.7s for four, 6.7s for twelve. Four keeps most of
-# the gain without making the first part uselessly short.
-FIRST_PART_CHUNKS = 4
+# concurrent wave, and a wave is bounded by its slowest request. Time to first
+# sound is therefore one request, and asking for several means waiting for the
+# worst of them: measured interleaved in both orders, median 2.7s for a
+# one-chunk first part, 5.7s for four, 6.7s for twelve.
+#
+# Making that one request smaller does not help — 139, 285 and 534 character
+# requests came back in a median of 2.6s, 0.9s and 1.4s, which is noise. What
+# does move the number is the service's mood: one whole round of that
+# measurement took 11-29s in every condition before settling at about a second.
+# So one chunk is the floor the code can reach, and roughly 40 seconds of audio
+# is a comfortable head start on the next part.
+FIRST_PART_CHUNKS = 1
 
 
 def plan_parts(
