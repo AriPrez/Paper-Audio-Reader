@@ -56,10 +56,15 @@ DEFAULT_CHUNK_CHARS = 600
 CHUNK_ATTEMPTS = 2
 
 # Chunks are independent, so they can be requested at the same time and
-# reassembled in order — the audio is unchanged, only the waiting is. The
-# ceiling matters: Edge throttles, and firing every chunk at once makes that
-# worse rather than better. See the measurement in the commit that added this.
-DEFAULT_CONCURRENCY = 4
+# reassembled in order — the audio is unchanged, only the waiting is.
+#
+# 4 was a guess about Edge throttling, and it was too cautious. Measured on 20
+# chunks, conditions interleaved and then re-run in reverse order so the result
+# could not be an artefact of position in the run: median 24.8s at 4, 13.8s at
+# 8, 9.3s at 12, with no failures at any level. Unlike chunk size — where 2000
+# characters times out where 600 succeeds — request count is not what Edge
+# punishes. _generate_chunk_with_retry remains the net if that ever changes.
+DEFAULT_CONCURRENCY = 12
 
 
 def chunk_text(text: str, max_chars: int = DEFAULT_CHUNK_CHARS) -> list[str]:

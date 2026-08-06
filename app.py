@@ -24,7 +24,14 @@ from parser import (
     render_page_with_red_underlines,
     select_blocks_in_region,
 )
-from tts_engine import DEFAULT_CHUNK_CHARS, VOICES, chunk_text, estimate_mp3_duration, generate_speech
+from tts_engine import (
+    DEFAULT_CHUNK_CHARS,
+    DEFAULT_CONCURRENCY,
+    VOICES,
+    chunk_text,
+    estimate_mp3_duration,
+    generate_speech,
+)
 
 
 st.set_page_config(
@@ -356,7 +363,7 @@ def render_audio_panel(
             0.0,
             text=(
                 f"Generating {total_segments} segment{'s' if total_segments > 1 else ''}"
-                f"{' (4 at a time)' if total_segments > 1 else ''}…"
+                f"{f' ({DEFAULT_CONCURRENCY} at a time)' if total_segments > DEFAULT_CONCURRENCY else ''}…"
             ),
         )
         try:

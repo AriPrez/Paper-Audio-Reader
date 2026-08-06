@@ -24,7 +24,7 @@ vocabulaire biomédical tout en retirant le bruit gênant pour la synthèse voca
   dans le champ de droite sans redessiner le rectangle.
 - Prononciation biomédicale : la notation est développée avant la synthèse,
   sans modifier le texte affiché (voir plus bas).
-- Synthèse Edge TTS découpée en segments courts, générés quatre à la fois et
+- Synthèse Edge TTS découpée en segments courts, générés douze à la fois et
   réassemblés dans l'ordre, avec timeout, reprise d'un segment bloqué,
   avancement, durée MP3 vérifiable, téléchargement et cache par contenu.
   Une section de 15 minutes d'audio se génère en une dizaine de secondes.
