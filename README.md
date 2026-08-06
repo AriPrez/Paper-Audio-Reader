@@ -8,6 +8,8 @@ vocabulaire biomédical tout en retirant le bruit gênant pour la synthèse voca
 
 ## Fonctionnalités
 
+- Écran d'entrée réduit à une seule action : la barre latérale et ses réglages
+  n'apparaissent qu'une fois un document ouvert.
 - Ordre de lecture adapté aux pages pleine largeur et à deux colonnes.
 - Sélection rectangulaire précise avec coordonnées X/Y renvoyées à Python :
   poignées de redimensionnement, déplacement, zoom, et aperçu en direct des

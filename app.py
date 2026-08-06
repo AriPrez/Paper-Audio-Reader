@@ -56,21 +56,6 @@ st.markdown(
       .stTextArea textarea { line-height: 1.62; font-size: .95rem; }
       .stAudio { width: 100%; }
       div[data-testid="stVerticalBlockBorderWrapper"] { padding-top: .15rem; }
-      /* Entry screen. Colour comes from the theme via currentColor and opacity,
-         so there is nothing here to keep in sync with dark mode. */
-      .hero { text-align: center; padding: 3.2rem 0 1.6rem; }
-      .hero.compact { padding: 1.6rem 0 1rem; }
-      .hero svg { opacity: .5; }
-      .hero h1 {
-        font-size: 2.7rem; line-height: 1.15; letter-spacing: -0.025em;
-        margin: 1.3rem 0 .6rem;
-      }
-      .hero.compact h1 { font-size: 1.9rem; margin-top: 0; }
-      .hero p {
-        max-width: 40rem; margin: 0 auto; opacity: .68;
-        font-size: 1.06rem; line-height: 1.62;
-      }
-      .hero.compact p { font-size: .98rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -114,25 +99,60 @@ def cache_key(text: str, voice: str, speed: float) -> str:
     return f"audio-v2:{digest}:{voice}:{speed:.2f}"
 
 
-# The mark inherits the surrounding text colour, so it follows the theme in
-# both modes without a second copy: a page, and the sound coming off it.
-HERO_MARK = """
-<svg viewBox="0 0 64 48" width="88" height="66" fill="none"
-     stroke="currentColor" stroke-width="1.6"
-     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-  <path d="M8 4h20l8 8v32H8z" />
-  <path d="M28 4v8h8" />
-  <path d="M14 20h14M14 26h14M14 32h9" />
-  <path d="M44 18a10 10 0 0 1 0 12" />
-  <path d="M50 13a17 17 0 0 1 0 22" />
-  <path d="M56 8a24 24 0 0 1 0 32" />
-</svg>
-"""
+# Streamlit publishes no theme CSS variable and no data-theme attribute in the
+# DOM, so an accent used inside inline SVG cannot be expressed in CSS alone. It
+# is resolved here instead; switching theme reruns the script, which redraws it.
+ACCENTS = {"light": "#0F7C91", "dark": "#4FBFD6"}
+
+
+def theme_accent() -> str:
+    try:
+        return ACCENTS.get(st.context.theme.type or "light", ACCENTS["light"])
+    except Exception:  # No script context: tests and bare imports.
+        return ACCENTS["light"]
+
+
+def hero_mark(accent: str) -> str:
+    """Draw the product rather than a symbol for it.
+
+    A document-with-soundwaves icon says "audio" and nothing more. What makes
+    this tool what it is, is the gesture: a rectangle over three lines of a
+    page, and only those lines coming out as speech. So the mark shows the
+    selection, the captured lines in the accent colour, and the sound leaving
+    the page. The greys are currentColor, so the paper follows the theme.
+    """
+    return f"""<svg viewBox="0 0 206 152" width="206" height="152" fill="none" aria-hidden="true">
+<g stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" opacity=".34">
+<path d="M24 11h72l24 24v98a4 4 0 0 1-4 4H24a4 4 0 0 1-4-4V15a4 4 0 0 1 4-4z"/>
+<path d="M96 11v20a4 4 0 0 0 4 4h20"/>
+</g>
+<g stroke="currentColor" stroke-width="3" stroke-linecap="round" opacity=".19">
+<path d="M33 52h54M33 62h66"/>
+<path d="M33 114h66M33 124h38"/>
+</g>
+<g stroke="{accent}" stroke-width="3" stroke-linecap="round" opacity=".85">
+<path d="M33 78h66M33 89h62M33 100h48"/>
+</g>
+<rect x="27" y="70" width="80" height="38" rx="2"
+      fill="{accent}" fill-opacity=".08" stroke="{accent}" stroke-width="1.5"/>
+<g fill="{accent}">
+<rect x="24" y="67" width="6" height="6" rx="1"/>
+<rect x="104" y="67" width="6" height="6" rx="1"/>
+<rect x="24" y="105" width="6" height="6" rx="1"/>
+<rect x="104" y="105" width="6" height="6" rx="1"/>
+</g>
+<g stroke="{accent}" stroke-width="2" stroke-linecap="round">
+<path d="M142 77a14 14 0 0 1 0 24" opacity=".9"/>
+<path d="M156 67a24 24 0 0 1 0 44" opacity=".62"/>
+<path d="M170 57a34 34 0 0 1 0 64" opacity=".34"/>
+</g>
+</svg>"""
+
 
 STEPS = (
-    ("1 · Upload", "Load a PDF with a text layer. Scanned pages need OCR first."),
-    ("2 · Select", "Drag a rectangle on the page, or click a paragraph to take it whole."),
-    ("3 · Listen", "Check the transcript, edit it if needed, then generate an MP3."),
+    ("1", "Upload", "A PDF with a text layer. Scanned pages need OCR first."),
+    ("2", "Select", "Drag a rectangle on the page, or click a paragraph to take it whole."),
+    ("3", "Listen", "Check the transcript, edit it if needed, then generate an MP3."),
 )
 
 PRIVACY_NOTE = (
@@ -141,6 +161,79 @@ PRIVACY_NOTE = (
     "text of your selection leaves the machine when you press generate. "
     "Avoid confidential, identifiable clinical or unpublished content."
 )
+
+# Only the entry screens. The sidebar is every setting of an application that
+# has not been opened yet, which reads as a preferences panel and drowns the one
+# action on the page; the wide layout exists for the reader, not for a page with
+# a single button on it.
+# Selectors are scoped under the markdown container on purpose. Streamlit's own
+# emotion rules for p/h1 inside it are more specific than a bare class, and win:
+# an unscoped `.note { margin-top }` computes to 0px.
+ENTRY_CSS = """
+<style>
+  section[data-testid="stSidebar"],
+  div[data-testid="stSidebarCollapsedControl"],
+  div[data-testid="stAppDeployButton"] { display: none !important; }
+  .stApp .block-container { max-width: 52rem; padding-top: 3.2rem; }
+
+  div[data-testid="stMarkdownContainer"] .entry { text-align: center; }
+  div[data-testid="stMarkdownContainer"] .entry .eyebrow {
+    text-transform: uppercase; letter-spacing: .15em;
+    font-size: .72rem; font-weight: 600; opacity: .5; margin: 0 0 1.1rem;
+  }
+  div[data-testid="stMarkdownContainer"] .entry svg { width: 246px; height: auto; }
+  /* Streamlit rewrites the h1 into a heading widget and injects an anchor-link
+     span inside it. Outside its usual layout that span goes into the flow and
+     adds ~250px of blank height under the title. A landing page has no section
+     to link to anyway. */
+  div[data-testid="stMarkdownContainer"] .entry [data-testid="stHeaderActionElements"] {
+    display: none;
+  }
+  div[data-testid="stMarkdownContainer"] .entry h1 {
+    font-size: 2.7rem; line-height: 1.12; letter-spacing: -0.028em;
+    padding: 0; margin: .9rem 0 .8rem;
+  }
+  div[data-testid="stMarkdownContainer"] .entry .lede {
+    max-width: 33rem; margin: 0 auto; opacity: .7;
+    font-size: 1.08rem; line-height: 1.6;
+  }
+  div[data-testid="stMarkdownContainer"] .entry.compact h1 {
+    font-size: 1.95rem; margin: 0 0 .5rem;
+  }
+  div[data-testid="stMarkdownContainer"] .entry.compact .lede { font-size: 1rem; }
+
+  /* A sequence, not three interchangeable boxes: the numeral carries the order
+     so the labels do not have to repeat it. They are divs rather than headings
+     because Streamlit rewrites any h1-h6 in this HTML into a heading widget
+     with its own anchor link — these are labels, not document sections. */
+  div[data-testid="stMarkdownContainer"] .steps {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem;
+    margin: 3.6rem 0 0; text-align: left;
+  }
+  div[data-testid="stMarkdownContainer"] .step {
+    border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+    padding-top: .85rem;
+  }
+  div[data-testid="stMarkdownContainer"] .step .n {
+    font-size: .95rem; font-weight: 700; opacity: .3;
+  }
+  div[data-testid="stMarkdownContainer"] .step .t {
+    font-size: 1rem; font-weight: 600; margin: .1rem 0 .35rem;
+  }
+  div[data-testid="stMarkdownContainer"] .step p {
+    font-size: .88rem; line-height: 1.55; opacity: .62; margin: 0;
+  }
+  @media (max-width: 640px) {
+    div[data-testid="stMarkdownContainer"] .steps { grid-template-columns: 1fr; gap: 1.3rem; }
+  }
+
+  div[data-testid="stMarkdownContainer"] .note {
+    margin: 3.2rem auto 0; max-width: 38rem;
+    font-size: .82rem; line-height: 1.6; opacity: .5; text-align: center;
+  }
+  div[data-testid="stMarkdownContainer"] .note strong { opacity: .9; }
+</style>
+"""
 
 
 def accept_upload(container) -> None:
@@ -161,31 +254,37 @@ def accept_upload(container) -> None:
 
 
 def render_steps_and_privacy() -> None:
-    for column, (heading, body) in zip(st.columns(3, gap="medium"), STEPS):
-        with column, st.container(border=True):
-            st.markdown(f"**{heading}**")
-            st.caption(body)
-    st.write("")
-    with st.container(border=True):
-        st.markdown("**Where your document goes**")
-        st.caption(PRIVACY_NOTE)
+    # Written flush left on purpose, here and below: Markdown turns any line
+    # indented by four spaces into a code block, which would render the tags as
+    # literal text on the page.
+    steps = "".join(
+        f"""<div class="step"><div class="n">{number}</div>
+<div class="t">{title}</div><p>{body}</p></div>"""
+        for number, title, body in STEPS
+    )
+    st.markdown(
+        f"""<div class="steps">{steps}</div>
+<p class="note"><strong>Where your document goes.</strong> {PRIVACY_NOTE}</p>""",
+        unsafe_allow_html=True,
+    )
 
 
 def render_landing() -> None:
     """Entry screen: one thing to read, one thing to press."""
-    # Flush left on purpose: Markdown turns any line indented by four spaces
-    # into a code block, which renders the tags as literal text.
+    st.markdown(ENTRY_CSS, unsafe_allow_html=True)
     st.markdown(
-        f"""<div class="hero">
-{HERO_MARK}
+        f"""<div class="entry">
+<p class="eyebrow">Scientific PDF → speech</p>
+{hero_mark(theme_accent())}
 <h1>Read a scientific paper aloud</h1>
-<p>Listen to a paper without the citation noise. Draw a rectangle over the
-paragraphs you want, and only those are extracted, cleaned and spoken —
-with the biomedical notation pronounced properly.</p>
+<p class="lede">Draw a rectangle over the paragraphs you want. Only those are
+extracted, stripped of citation noise, and spoken — with the biomedical
+notation pronounced properly.</p>
 </div>""",
         unsafe_allow_html=True,
     )
-    _, middle, _ = st.columns([1, 1.1, 1])
+    st.write("")
+    _, middle, _ = st.columns([1, 1, 1])
     with middle:
         if st.button(
             "Start reading",
@@ -195,24 +294,22 @@ with the biomedical notation pronounced properly.</p>
         ):
             st.session_state.started = True
             st.rerun()
-    st.write("")
-    st.write("")
     render_steps_and_privacy()
 
 
 def render_upload_screen() -> None:
     """Shown once past the landing, while no document is open."""
+    st.markdown(ENTRY_CSS, unsafe_allow_html=True)
     st.markdown(
-        '<div class="hero compact">'
-        "<h1>Choose a paper</h1>"
-        "<p>A PDF with a text layer. It stays on this machine.</p>"
-        "</div>",
+        """<div class="entry compact">
+<h1>Choose a paper</h1>
+<p class="lede">A PDF with a text layer. It stays on this machine.</p>
+</div>""",
         unsafe_allow_html=True,
     )
-    _, middle, _ = st.columns([1, 2, 1])
+    _, middle, _ = st.columns([1, 3, 1])
     with middle:
         accept_upload(middle)
-    st.write("")
     render_steps_and_privacy()
 
 
