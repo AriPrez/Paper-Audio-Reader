@@ -221,6 +221,13 @@
       audio.addEventListener("pause", () => { if (!advancing) render(); });
 
       audio.addEventListener("ended", () => {
+        // The probe's metadata and the decoder disagree at the end of a part:
+        // one measured at 22s stopped at 16.5s, and the clock jumped by the
+        // difference at every boundary. Where playback actually finished is
+        // the honest length, so it replaces the estimate once it is known.
+        if (parts[current] && audio.currentTime > 0) {
+          parts[current].duration = audio.currentTime;
+        }
         if (parts[current + 1]) {
           advancing = true;
           load(current + 1, true);
@@ -275,6 +282,40 @@
         }
         render();
       });
+
+      /* ---- stall recovery ---------------------------------------------
+         Playback froze once mid-part for thirty seconds: not paused, not
+         ended, no media error, the clock simply stopped while generation was
+         running. It is rare — once in thirteen recorded runs — and the data is
+         a blob already in memory, so the cause is in the browser's decoder
+         rather than in this file. Whatever it is, silence under a pause button
+         is the worst possible outcome, so a stall lasting more than three
+         seconds reloads the current part and seeks back to where it stopped. */
+
+      let tick = { at: -1, since: 0 };
+
+      function watchdog() {
+        if (audio.paused || audio.ended || !parts[current]) {
+          tick = { at: -1, since: 0 };
+          return;
+        }
+        const now = performance.now();
+        if (Math.abs(audio.currentTime - tick.at) > 0.05) {
+          tick = { at: audio.currentTime, since: now };
+          return;
+        }
+        if (now - tick.since < 3000) return;
+        const resumeAt = audio.currentTime;
+        tick = { at: -1, since: now };
+        audio.src = parts[current].url;
+        audio.addEventListener("loadedmetadata", function once() {
+          audio.removeEventListener("loadedmetadata", once);
+          try { audio.currentTime = resumeAt; } catch (error) { /* start over */ }
+          audio.play().catch(() => render());
+        });
+      }
+
+      setInterval(watchdog, 1000);
 
       /* ---- theme and render -------------------------------------------- */
 
@@ -343,7 +384,7 @@
           if (!part.data || seen.has(index)) continue;
           seen.add(index);
           parts[index] = { index, url: toUrl(part.data), duration: 0 };
-          measure(parts[index]);
+          if (index !== current || !audio.src) measure(parts[index]);
           added = true;
         }
         if (added && !audio.src && parts[0]) load(0, false);
