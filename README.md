@@ -45,6 +45,10 @@ n'est demandée.
   Streamlit et ne sont pas téléversés par l'application.
 - Lorsque l'utilisateur demande un audio, **le texte nettoyé de la sélection est
   envoyé au service en ligne Microsoft Edge TTS** pour produire la voix.
+- À l'ouverture d'un document, une requête de préchauffage contenant le seul
+  mot `Ready.` est envoyée une fois par processus. Elle paie le coût de mise en
+  route d'Edge à l'avance (14 s mesurées sur la première requête d'un processus,
+  contre 0,7 à 3,9 s ensuite). **Aucun contenu du document n'y figure.**
 - Il est donc déconseillé d'utiliser la synthèse vocale avec du contenu
   confidentiel, clinique identifiable ou non publiable.
 - Aucun PDF de test ou article scientifique protégé n'est distribué avec ce

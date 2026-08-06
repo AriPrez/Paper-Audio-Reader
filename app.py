@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import sys
+import threading
 
 import fitz
 import streamlit as st
@@ -101,6 +102,32 @@ def reset_document(pdf_bytes: bytes, name: str = "") -> None:
     st.session_state.selector_revision += 1
     st.session_state.audio_cache.clear()
     st.cache_data.clear()
+
+
+@st.cache_resource(show_spinner=False)
+def warm_speech_service() -> bool:
+    """Pay Edge's one-time setup before anybody is waiting on it.
+
+    The first synthesis in a process is far slower than the rest: measured in a
+    fresh interpreter, 14.1s for the first request against 0.7-3.9s for the
+    next four. Whoever generates first on a freshly started server pays that,
+    and it is most of the difference between a two-second wait and a ten-second
+    one. Warming it when a document is opened moves the cost to a moment when
+    nobody has asked for anything yet.
+
+    A fixed word is sent, never the document: see the privacy note. It runs on
+    a daemon thread so opening a PDF is not held up, and failure is ignored
+    because this is an optimisation, not a step.
+    """
+
+    def ping() -> None:
+        try:
+            render_part(["Ready."], timeout_seconds=20)
+        except Exception:
+            pass
+
+    threading.Thread(target=ping, daemon=True).start()
+    return True
 
 
 def cache_key(text: str, voice: str, speed: float) -> str:
@@ -372,32 +399,17 @@ def render_audio_panel(
     streaming = isinstance(stream, dict) and stream.get("job") == key
     if streaming:
         plan = stream["plan"]
+        # The player's place is claimed before the part is requested and filled
+        # afterwards, so a finished part reaches it inside the same script run.
+        # Rendering the player first instead would leave it empty until the
+        # next rerun, putting a whole rerun — which re-sends the page image to
+        # the selector — between the audio existing and anyone hearing it.
+        player_slot = st.container()
+        progress_slot = st.empty()
+
         finished = len(stream["parts"])
-        complete = finished >= len(plan)
-
-        # The player is rendered before the next part is requested, not after:
-        # Streamlit sends each element to the browser as the script produces
-        # it, so what is already made starts playing while the rest is still
-        # being generated. That ordering is the whole feature.
-        pending = [
-            (index, stream["parts"][index])
-            for index in sorted(stream["parts"])
-            if index not in stream["sent"]
-        ]
-        render_audio_queue(
-            job=stream["job"],
-            new_parts=pending,
-            total_parts=len(plan),
-            done=complete,
-            key=f"{key_prefix}_queue",
-        )
-        stream["sent"].extend(index for index, _ in pending)
-
-        if stream["error"]:
-            st.error(stream["error"])
-        elif not complete:
+        if not stream["error"] and finished < len(plan):
             start, stop = plan[finished]
-            progress_slot = st.empty()
             bar = progress_slot.progress(
                 finished / len(plan),
                 text=f"Generating part {finished + 1} of {len(plan)}…",
@@ -422,6 +434,27 @@ def render_audio_panel(
                 stream["error"] = str(exc)
             finally:
                 progress_slot.empty()
+            finished = len(stream["parts"])
+
+        complete = finished >= len(plan)
+        pending = [
+            (index, stream["parts"][index])
+            for index in sorted(stream["parts"])
+            if index not in stream["sent"]
+        ]
+        with player_slot:
+            render_audio_queue(
+                job=stream["job"],
+                new_parts=pending,
+                total_parts=len(plan),
+                done=complete,
+                key=f"{key_prefix}_queue",
+            )
+        stream["sent"].extend(index for index, _ in pending)
+
+        if stream["error"]:
+            st.error(stream["error"])
+        elif not complete:
             st.rerun()
         elif key not in st.session_state.audio_cache:
             st.session_state.audio_cache[key] = join_mp3_parts(
@@ -605,6 +638,10 @@ if not text_sample:
     st.warning("No selectable text was found. This appears to be a scanned PDF; OCR is required first.")
 
 st.session_state.pdf_page_num = min(max(1, st.session_state.pdf_page_num), total_pdf_pages)
+
+# A document is open, so speech is likely and the wait for it starts now, in
+# the background, rather than when the first selection is ready to be read.
+warm_speech_service()
 
 st.caption(
     f"{st.session_state.pdf_name or 'Document'} · "
