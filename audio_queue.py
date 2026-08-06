@@ -19,21 +19,26 @@ def render_audio_queue(
     new_parts: list[tuple[int, bytes]],
     total_parts: int | None,
     done: bool,
+    estimated_seconds: float = 0.0,
     key: str = "audio_queue",
-) -> None:
+) -> set[int]:
     """Hand newly finished parts to the player without interrupting playback.
 
-    Only parts the component has not received yet are passed in. The component
-    keeps every part it has been given for the life of its iframe, which
-    survives reruns, so re-sending them would put a few megabytes of base64 on
-    the websocket every time anything else on the page reruns — the audio would
-    arrive faster and the interface would get slower. A part carries its index
-    and is added once, so a repeated send is harmless if it ever happens.
+    Only parts the component has not received yet are passed in, and it is the
+    component that says which those are — the returned set. Re-sending them all
+    on every render would put megabytes of base64 on the websocket whenever
+    anything else on the page reruns, and assuming a send arrived is worse: a
+    rerun can replace an element's arguments before a freshly mounted iframe
+    has received the previous ones, and that part is lost for good. Asking is
+    also self-healing, since a remounted iframe reports an empty inventory.
 
     ``job`` identifies the recording. When it changes the component drops what
     it holds, otherwise a new selection would play after the previous one.
+
+    ``estimated_seconds`` scales the progress bar before the real length is
+    known, so the thumb does not jump backwards each time a part arrives.
     """
-    _COMPONENT(
+    value = _COMPONENT(
         job=job,
         parts=[
             {"index": index, "data": base64.b64encode(audio).decode("ascii")}
@@ -41,6 +46,14 @@ def render_audio_queue(
         ],
         total_parts=int(total_parts) if total_parts else None,
         done=bool(done),
+        estimated_seconds=float(estimated_seconds or 0.0),
         default=None,
         key=key,
     )
+    if not isinstance(value, dict) or value.get("job") != job:
+        # No inventory yet, or one belonging to the previous recording.
+        return set()
+    try:
+        return {int(index) for index in value.get("have") or []}
+    except (TypeError, ValueError):
+        return set()

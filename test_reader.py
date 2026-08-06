@@ -798,3 +798,20 @@ def test_joining_parts_keeps_only_the_leading_tag() -> None:
     assert join_mp3_parts([tag + b"a", tag + b"b", tag + b"c"]) == tag + b"abc"
     assert join_mp3_parts([]) == b""
     assert join_mp3_parts([b"", tag + b"a"]) == tag + b"a"
+
+
+def test_projected_length_uses_measured_speech_not_an_assumed_rate() -> None:
+    """The progress bar is scaled by this, so a bad projection walks backwards."""
+    from tts_engine import project_total_seconds
+
+    # A real CBR frame header so the duration estimator has something to read.
+    part = b"\xff\xf3\x64\xc4" + b"\x00" * 20_000
+    measured = estimate_mp3_duration(part)
+    assert measured and measured > 0
+
+    # A quarter of the characters are done, so the whole should be four times.
+    assert project_total_seconds([part], 500, 2000) == pytest.approx(measured * 4)
+    # Nothing measurable yet: the caller's own estimate stands.
+    assert project_total_seconds([], 0, 2000, fallback=42.0) == 42.0
+    assert project_total_seconds([part], 0, 2000, fallback=42.0) == 42.0
+    assert project_total_seconds([part], 500, 0, fallback=42.0) == 42.0

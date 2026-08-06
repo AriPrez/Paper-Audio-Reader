@@ -241,6 +241,28 @@ async def _generate_chunk_with_retry(
     raise last_error  # type: ignore[misc]
 
 
+def project_total_seconds(
+    parts: list[bytes],
+    characters_done: int,
+    characters_total: int,
+    fallback: float = 0.0,
+) -> float:
+    """Estimate the finished length from the parts that already exist.
+
+    A progress bar scaled to the parts made so far walks backwards every time
+    another arrives, which is alarming to watch while listening. Scaling it to
+    a guess is only as good as the guess: words-per-minute under-estimated
+    enough to move the thumb back by a quarter of the bar. Measured speech is a
+    far better ruler than an assumed reading speed, and characters map onto it
+    almost linearly, so once any part exists its own length says how long the
+    rest will be.
+    """
+    measured = sum(estimate_mp3_duration(part) or 0.0 for part in parts)
+    if measured <= 0 or characters_done <= 0 or characters_total <= 0:
+        return float(fallback)
+    return measured * characters_total / characters_done
+
+
 def join_mp3_parts(parts: list[bytes]) -> bytes:
     """Concatenate standalone MP3 parts into one playable file.
 

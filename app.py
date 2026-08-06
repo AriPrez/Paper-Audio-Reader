@@ -33,6 +33,7 @@ from tts_engine import (
     estimate_mp3_duration,
     join_mp3_parts,
     plan_parts,
+    project_total_seconds,
     render_part,
 )
 
@@ -388,7 +389,7 @@ def render_audio_panel(
             "chunks": speech_chunks,
             "plan": plan_parts(len(speech_chunks)),
             "parts": {},
-            "sent": [],
+            "held": set(),
             "voice": voice,
             "speed": speed,
             "error": None,
@@ -410,9 +411,14 @@ def render_audio_panel(
         finished = len(stream["parts"])
         if not stream["error"] and finished < len(plan):
             start, stop = plan[finished]
-            bar = progress_slot.progress(
-                finished / len(plan),
-                text=f"Generating part {finished + 1} of {len(plan)}…",
+            # Progress is shown only while there is nothing to listen to yet.
+            # Once the first part is playable the rest is none of the
+            # listener's business, and a bar that keeps filling next to a
+            # playing recording reads as a problem rather than as progress.
+            bar = (
+                progress_slot.progress(0.0, text="Generating the first part…")
+                if finished == 0
+                else None
             )
             try:
                 stream["parts"][finished] = render_part(
@@ -420,12 +426,11 @@ def render_audio_panel(
                     voice=stream["voice"],
                     rate=stream["speed"],
                     timeout_seconds=45,
-                    progress=lambda made, total: bar.progress(
-                        (finished + made / total) / len(plan),
-                        text=(
-                            f"Part {finished + 1} of {len(plan)} — "
-                            f"segment {made} of {total}"
-                        ),
+                    progress=(
+                        (lambda made, total: bar.progress(made / total,
+                            text=f"Generating the first part — segment {made} of {total}…"))
+                        if bar is not None
+                        else None
                     ),
                 )
             except Exception as exc:
@@ -437,20 +442,32 @@ def render_audio_panel(
             finished = len(stream["parts"])
 
         complete = finished >= len(plan)
+        # The player reports what it actually holds; anything else is resent.
+        # Tracking what was sent instead loses a part whenever a rerun replaces
+        # the component's arguments before its iframe has finished mounting.
         pending = [
             (index, stream["parts"][index])
             for index in sorted(stream["parts"])
-            if index not in stream["sent"]
+            if index not in stream["held"]
         ]
         with player_slot:
-            render_audio_queue(
+            made = [stream["parts"][index] for index in sorted(stream["parts"])]
+            characters_done = sum(
+                len(chunk) for chunk in stream["chunks"][: plan[finished - 1][1]]
+            ) if finished else 0
+            stream["held"] = render_audio_queue(
                 job=stream["job"],
                 new_parts=pending,
                 total_parts=len(plan),
                 done=complete,
+                estimated_seconds=project_total_seconds(
+                    made,
+                    characters_done,
+                    sum(len(chunk) for chunk in stream["chunks"]),
+                    fallback=estimate * 60.0,
+                ),
                 key=f"{key_prefix}_queue",
             )
-        stream["sent"].extend(index for index, _ in pending)
 
         if stream["error"]:
             st.error(stream["error"])

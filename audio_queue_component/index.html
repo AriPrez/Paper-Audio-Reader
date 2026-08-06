@@ -97,12 +97,31 @@
       let complete = false;
       let current = 0;           // index of the part loaded in the element
       let advancing = false;     // suppresses the pause icon between parts
+      let started = false;       // the listener has pressed play at least once
+      let stalled = false;       // playback caught up with generation
+      let estimated = 0;         // provisional length, from the word count
+      let job = null;
+      let announced = null;
 
       const audio = new Audio();
       audio.preload = "auto";
 
       function post(type, payload = {}) {
         window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, "*");
+      }
+
+      // Python sends only the parts this component does not have, so it has to
+      // be told what that is. Guessing from what was sent is what broke: a
+      // rerun can replace an element's arguments before a freshly mounted
+      // iframe has received the previous ones, and that part is then lost for
+      // good — the queue skips it and playback breaks on a missing part.
+      function announce() {
+        const have = [];
+        parts.forEach((part, index) => { if (part) have.push(index); });
+        const signature = job + "|" + have.join(",");
+        if (signature === announced) return;
+        announced = signature;
+        post("streamlit:setComponentValue", { value: { job, have } });
       }
 
       function resizeFrame() {
@@ -135,27 +154,46 @@
         return parts.reduce((total, part) => total + (part.duration || 0), 0);
       }
 
+      // Scaling the bar to the parts that exist would make the thumb jump
+      // backwards every time one arrives — playing at 0:02 of 0:27 sits at 7%,
+      // and the same instant sits at 0.4% once the total is 9:22. Until the
+      // real length is known the bar is scaled to the estimate Python already
+      // shows above the button, so the thumb only ever moves forwards.
+      function timeline() {
+        const known = knownDuration();
+        return complete ? known : Math.max(known, estimated);
+      }
+
       function elapsed() {
         return offsetOf(current) + (audio.currentTime || 0);
       }
 
       function render() {
-        const known = knownDuration();
+        const span = timeline();
         const at = elapsed();
-        playButton.disabled = parts.length === 0;
-        seek.disabled = parts.length === 0;
-        seek.value = known > 0 ? Math.round((at / known) * 1000) : 0;
-        timeLabel.textContent = `${clock(at)} / ${clock(known)}${complete ? "" : "…"}`;
+        const ready = Boolean(parts[0]);
+        playButton.disabled = !ready;
+        seek.disabled = !ready;
+        seek.value = span > 0 ? Math.round((Math.min(at, span) / span) * 1000) : 0;
+        timeLabel.textContent = `${clock(at)} / ${clock(span)}${complete ? "" : "…"}`;
 
-        if (!complete) {
+        // Once somebody is listening, the fact that the rest is still being
+        // made is not their problem and saying so only makes them anxious. It
+        // is worth showing before they start, when the wait is the point, and
+        // in the one case where it explains actual silence.
+        if (stalled) {
+          note.textContent = "The next part is on its way";
+          note.classList.add("pending");
+        } else if (!complete && !started) {
+          const done = parts.filter(Boolean).length;
           const made = expected
-            ? `${parts.length} of ${expected} parts ready`
-            : `${parts.length} part(s) ready`;
+            ? `${done} of ${expected} parts ready`
+            : `${done} part(s) ready`;
           note.textContent = `Generating the rest — ${made}`;
           note.classList.add("pending");
         } else {
           note.classList.remove("pending");
-          note.textContent = parts.length > 1 ? `${parts.length} parts` : "";
+          note.textContent = "";
         }
         playIcon.setAttribute("d", audio.paused ? PLAY : PAUSE);
         playButton.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
@@ -163,7 +201,7 @@
       }
 
       function load(index, autoplay) {
-        if (index < 0 || index >= parts.length) return;
+        if (index < 0 || !parts[index]) return;
         current = index;
         audio.src = parts[index].url;
         if (autoplay) {
@@ -183,38 +221,43 @@
       audio.addEventListener("pause", () => { if (!advancing) render(); });
 
       audio.addEventListener("ended", () => {
-        if (current + 1 < parts.length) {
+        if (parts[current + 1]) {
           advancing = true;
           load(current + 1, true);
           advancing = false;
           return;
         }
-        if (!complete) {
-          // Caught up with generation: the next part starts by itself when it
-          // arrives, so the listener is not asked to press play again.
-          note.textContent = "Waiting for the next part…";
-          note.classList.add("pending");
-        }
+        // Caught up with generation: the next part starts by itself when it
+        // arrives, so the listener is not asked to press play again. This is
+        // the only moment the wait is worth mentioning, because it is the only
+        // one where it is audible.
+        stalled = !complete;
         render();
       });
 
       playButton.addEventListener("click", () => {
-        if (!parts.length) return;
+        if (!parts[0]) return;
         if (audio.paused) {
+          started = true;
           if (!audio.src) load(0, true);
           else audio.play().catch(() => render());
         } else {
           audio.pause();
         }
+        // Repainted here rather than waiting for the play event: that event
+        // fires when the browser actually starts, and a button that stays on
+        // the play icon in the meantime reads as a click that did not land.
+        render();
       });
 
       seek.addEventListener("input", () => {
+        // Seeking is bounded by what exists, not by the estimate.
         const known = knownDuration();
         if (!known) return;
-        const target = (Number(seek.value) / 1000) * known;
+        const target = Math.min((Number(seek.value) / 1000) * timeline(), known);
         let index = 0;
         let remaining = target;
-        while (index + 1 < parts.length && remaining > (parts[index].duration || 0)) {
+        while (parts[index + 1] && remaining > (parts[index].duration || 0)) {
           remaining -= parts[index].duration || 0;
           index += 1;
         }
@@ -287,9 +330,10 @@
 
         // A new job reuses the same iframe; without this its parts would be
         // appended to the previous recording.
-        if (args.job && args.job !== reset.job) {
+        if (args.job && args.job !== job) {
           reset();
-          reset.job = args.job;
+          job = args.job;
+          announced = null;
         }
 
         const incoming = Array.isArray(args.parts) ? args.parts : [];
@@ -302,13 +346,16 @@
           measure(parts[index]);
           added = true;
         }
-        if (added && !audio.src && parts.length) load(0, false);
+        if (added && !audio.src && parts[0]) load(0, false);
         expected = Number(args.total_parts) || null;
+        estimated = Number(args.estimated_seconds) || 0;
         complete = Boolean(args.done);
 
-        if (added && audio.paused && audio.ended && current + 1 < parts.length) {
+        if (added && audio.paused && audio.ended && parts[current + 1]) {
+          stalled = false;
           load(current + 1, true);   // resume a listener who caught up
         }
+        announce();
         render();
       });
 
